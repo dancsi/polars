@@ -486,6 +486,7 @@ pub fn get_supertype_with_options(
                 }
             }
             (dt, Unknown(kind)) => {
+                eprintln!("computing the supertype of {dt:?} and Unknown {kind:?}");
                 match kind {
                     UnknownKind::Float | UnknownKind::Int(_) if  dt.is_string() => {
                         if options.allow_primitive_to_string() {
@@ -551,7 +552,9 @@ pub fn get_supertype_with_options(
         }
     }
 
-    inner(l, r, options).or_else(|| inner(r, l, options))
+    let computed = inner(l, r, options).or_else(|| inner(r, l, options));
+    eprintln!("supertype({l:?}, {r:?}) = {computed:?}");
+    computed
 }
 
 /// Given multiple data types, determine the data type that all types can safely be cast to.

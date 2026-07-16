@@ -1,16 +1,21 @@
 import polars as pl
 import os
+
 os.environ["RUST_BACKTRACE"] = "1"
 
-
 df = pl.DataFrame({
-    'a':[
+    'a': [
         [0.1],
-        [0.3]
+        [0.2]
+    ],
+    'b': [
+        [0.3],
+        [0.4]
     ]
-}, schema={'a':pl.List(pl.Float32)})
+}, schema={'a': pl.List(pl.Float32), 'b': pl.Array(pl.Float32, 1)})
 
-df.lazy().select(pl.col('a')+1).sink_parquet('sink_test.pq', statistics=False)
-# df.lazy().select(pl.col('a')+pl.lit(1).cast(pl.Float32)).sink_parquet('sink_test.pq', statistics=False)
+res = df.lazy().select((pl.col('a') + 1).alias('list_sum'), (pl.col('b') + 1).alias('arr_sum'),
+                       (pl.col('a') * 2).alias('list_prod'), (pl.col('b') * 2).alias('arr_prod'))
 
-print(pl.read_parquet('sink_test.pq'))
+print(res.collect_schema())
+print(res.collect().schema)

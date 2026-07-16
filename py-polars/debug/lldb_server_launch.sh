@@ -141,6 +141,22 @@ fi
 # referenced from this point on is already validated above.
 set +u
 
+# On macOS, debugserver appears to canonicalize its target executable's path
+# before spawning it. $PYTHON is normally a venv's `bin/python` symlink, and
+# once debugserver resolves that symlink away, CPython's own venv detection
+# (which keys off the literal invoked path) never sees it — it silently
+# falls back to the base interpreter, so `import polars` (and anything else
+# installed only in the venv) fails with a ModuleNotFoundError, even though
+# the same invocation works fine outside a debugger.
+#
+# Work around it with $PYTHONEXECUTABLE: CPython uses it, when set, as
+# sys.executable/sys.prefix instead of the invoked path, so venv detection
+# is correct no matter what path debugserver actually execs.
+if [[ "$PLATFORM" == mac ]]; then
+  export PYTHONEXECUTABLE="$PYTHON"
+fi
+TARGET_CMD=("$PYTHON" "$TARGET" "$@")
+
 # --- port helpers ----------------------------------------------------------
 # Print PIDs of processes LISTENing on $PORT (owned by this user), if any.
 listener_pids() {
@@ -183,7 +199,7 @@ if [[ "$FOREGROUND" == "1" ]]; then
   log "target      : $TARGET $*"
   log "listening on $HOST:$PORT — start the RustRover 'Remote Debug' config now"
   # Replace this shell; Ctrl-C then stops the server directly.
-  exec "$LLDB_SERVER" "${SERVER_ARGS[@]}" "$HOST:$PORT" -- "$PYTHON" "$TARGET" "$@"
+  exec "$LLDB_SERVER" "${SERVER_ARGS[@]}" "$HOST:$PORT" -- "${TARGET_CMD[@]}"
 fi
 
 # Background mode (default), suitable as a blocking "Before launch" task:
@@ -194,10 +210,10 @@ LOG_FILE="$SCRIPT_DIR/.lldb-server.log"
 # setsid (Linux/util-linux) fully detaches into a new session; macOS has no
 # setsid, so fall back to nohup, which is enough to survive this shell exiting.
 if command -v setsid >/dev/null 2>&1; then
-  setsid "$LLDB_SERVER" "${SERVER_ARGS[@]}" "$HOST:$PORT" -- "$PYTHON" "$TARGET" "$@" \
+  setsid "$LLDB_SERVER" "${SERVER_ARGS[@]}" "$HOST:$PORT" -- "${TARGET_CMD[@]}" \
     >"$LOG_FILE" 2>&1 </dev/null &
 else
-  nohup "$LLDB_SERVER" "${SERVER_ARGS[@]}" "$HOST:$PORT" -- "$PYTHON" "$TARGET" "$@" \
+  nohup "$LLDB_SERVER" "${SERVER_ARGS[@]}" "$HOST:$PORT" -- "${TARGET_CMD[@]}" \
     >"$LOG_FILE" 2>&1 </dev/null &
 fi
 server_pid=$!
