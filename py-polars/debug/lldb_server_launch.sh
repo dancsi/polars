@@ -27,11 +27,13 @@
 # Environment overrides (all optional):
 #   DEBUG_HOST    bind address                (default: 127.0.0.1)
 #   DEBUG_PORT    listen port                 (default: 1234)
-#   LLDB_SERVER   path to lldb-server         (default: RustRover Toolbox bundle,
-#                                              falling back to one on PATH)
+#   LLDB_SERVER   path to lldb-server/        (default: RustRover bundle, falling
+#                 debugserver                  back to one on PATH)
 #   VENV_PYTHON   python interpreter          (default: <repo>/.venv/bin/python)
 #   DEBUG_SCRIPT  default target script       (default: <this dir>/repro.py)
 #
+# Supports Linux (via RustRover's bundled `lldb-server`) and macOS (via Apple's
+# `debugserver`, which speaks the same gdb-remote protocol directly).
 set -euo pipefail
 
 log()  { printf '%s\n' "==> $*" >&2; }
@@ -68,21 +70,76 @@ case "$TARGET" in
        active editor tab — not this launcher. Or hardcode the script in Arguments." ;;
 esac
 
-# lldb-server: prefer an explicit override, then the RustRover Toolbox bundle,
-# then anything on PATH.
-default_lldb="$HOME/.local/share/JetBrains/Toolbox/apps/rustrover/bin/lldb/linux/x64/bin/lldb-server"
+# --- platform detection -----------------------------------------------------
+case "$(uname -s)" in
+  Linux)  PLATFORM=linux ;;
+  Darwin) PLATFORM=mac ;;
+  *) die "unsupported platform: $(uname -s) (this script supports Linux and macOS)" ;;
+esac
+
+case "$(uname -m)" in
+  x86_64|amd64)  ARCH=x64 ;;
+  arm64|aarch64) ARCH=aarch64 ;;
+  *) die "unsupported architecture: $(uname -m)" ;;
+esac
+
+# lldb-server/debugserver: prefer an explicit override, then the RustRover
+# bundle, then anything on PATH. Linux ships `lldb-server` (run via its
+# `gdbserver` subcommand); macOS ships Apple's `debugserver`, which speaks the
+# same gdb-remote protocol directly, so it takes no subcommand.
+find_bundled_server() {
+  if [[ "$PLATFORM" == linux ]]; then
+    local p="$HOME/.local/share/JetBrains/Toolbox/apps/rustrover/bin/lldb/linux/$ARCH/bin/lldb-server"
+    [[ -x "$p" ]] && { printf '%s\n' "$p"; return 0; }
+    return 1
+  fi
+
+  local rel="Contents/bin/lldb/mac/$ARCH/LLDB.framework/Resources/debugserver"
+  local c
+  for c in \
+    "$HOME/Applications/RustRover.app/$rel" \
+    "/Applications/RustRover.app/$rel" \
+    "/Library/Developer/CommandLineTools/Library/PrivateFrameworks/LLDB.framework/Versions/A/Resources/debugserver" \
+    "/Applications/Xcode.app/Contents/SharedFrameworks/LLDB.framework/Versions/A/Resources/debugserver"
+  do
+    [[ -x "$c" ]] && { printf '%s\n' "$c"; return 0; }
+  done
+
+  # JetBrains Toolbox installs RustRover.app under a version-numbered path.
+  local toolbox_hit
+  toolbox_hit="$(find "$HOME/Library/Application Support/JetBrains/Toolbox/apps" \
+    -ipath "*RustRover*/$rel" -print -quit 2>/dev/null || true)"
+  [[ -n "$toolbox_hit" ]] && { printf '%s\n' "$toolbox_hit"; return 0; }
+  return 1
+}
+
 LLDB_SERVER="${LLDB_SERVER:-}"
 if [[ -z "$LLDB_SERVER" ]]; then
-  if [[ -x "$default_lldb" ]]; then
-    LLDB_SERVER="$default_lldb"
-  elif command -v lldb-server >/dev/null 2>&1; then
+  if bundled="$(find_bundled_server)"; then
+    LLDB_SERVER="$bundled"
+  elif [[ "$PLATFORM" == linux ]] && command -v lldb-server >/dev/null 2>&1; then
     LLDB_SERVER="$(command -v lldb-server)"
+  elif [[ "$PLATFORM" == mac ]] && command -v debugserver >/dev/null 2>&1; then
+    LLDB_SERVER="$(command -v debugserver)"
   else
-    die "lldb-server not found (looked at '$default_lldb' and PATH)
-       set LLDB_SERVER to your RustRover bundle's lldb-server"
+    die "lldb-server/debugserver not found (checked the RustRover bundle and PATH)
+       set LLDB_SERVER to your RustRover bundle's lldb-server (Linux) or debugserver (macOS)"
   fi
 fi
 [[ -x "$LLDB_SERVER" ]] || die "lldb-server not executable: $LLDB_SERVER"
+
+# lldb-server needs its `gdbserver` subcommand; debugserver takes none.
+if [[ "$(basename "$LLDB_SERVER")" == lldb-server ]]; then
+  SERVER_ARGS=(gdbserver)
+else
+  SERVER_ARGS=()
+fi
+
+# macOS ships bash 3.2 (last GPLv2 release), where `"${arr[@]}"` on a
+# zero-element array raises "unbound variable" under `set -u`. Drop nounset
+# here rather than working around it at each call site: every variable
+# referenced from this point on is already validated above.
+set +u
 
 # --- port helpers ----------------------------------------------------------
 # Print PIDs of processes LISTENing on $PORT (owned by this user), if any.
@@ -126,7 +183,7 @@ if [[ "$FOREGROUND" == "1" ]]; then
   log "target      : $TARGET $*"
   log "listening on $HOST:$PORT — start the RustRover 'Remote Debug' config now"
   # Replace this shell; Ctrl-C then stops the server directly.
-  exec "$LLDB_SERVER" gdbserver "$HOST:$PORT" -- "$PYTHON" "$TARGET" "$@"
+  exec "$LLDB_SERVER" "${SERVER_ARGS[@]}" "$HOST:$PORT" -- "$PYTHON" "$TARGET" "$@"
 fi
 
 # Background mode (default), suitable as a blocking "Before launch" task:
@@ -134,8 +191,15 @@ fi
 # Remote Debug config never races ahead of a not-yet-bound port.
 LOG_FILE="$SCRIPT_DIR/.lldb-server.log"
 : > "$LOG_FILE"
-setsid "$LLDB_SERVER" gdbserver "$HOST:$PORT" -- "$PYTHON" "$TARGET" "$@" \
-  >"$LOG_FILE" 2>&1 </dev/null &
+# setsid (Linux/util-linux) fully detaches into a new session; macOS has no
+# setsid, so fall back to nohup, which is enough to survive this shell exiting.
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$LLDB_SERVER" "${SERVER_ARGS[@]}" "$HOST:$PORT" -- "$PYTHON" "$TARGET" "$@" \
+    >"$LOG_FILE" 2>&1 </dev/null &
+else
+  nohup "$LLDB_SERVER" "${SERVER_ARGS[@]}" "$HOST:$PORT" -- "$PYTHON" "$TARGET" "$@" \
+    >"$LOG_FILE" 2>&1 </dev/null &
+fi
 server_pid=$!
 
 for _ in $(seq 1 100); do   # up to ~10s
