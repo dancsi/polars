@@ -10,6 +10,7 @@ pub use borrowed::*;
 #[cfg(feature = "dtype-array")]
 pub use fixed_size_list::NumericFixedSizeListOp;
 pub use list::NumericListOp;
+pub use list_utils::NumericOp;
 use num_traits::{Num, NumCast};
 #[cfg(feature = "dtype-array")]
 mod fixed_size_list;

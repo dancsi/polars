@@ -2,6 +2,7 @@
 use polars_utils::matches_any_order;
 
 use super::*;
+use crate::plans::aexpr::schema::list_arithmetic_leaf_supertype;
 
 macro_rules! unpack {
     ($packed:expr) => {{
@@ -94,6 +95,53 @@ fn process_struct_numeric_arithmetic(
         },
         _ => unreachable!(),
     }
+}
+
+/// Cast list/array arithmetic operands (and any scalar/literal counterpart) to their common leaf
+/// supertype, using the same rule schema resolution already relies on
+/// (`aexpr::schema::list_arithmetic_leaf_supertype`). Without this, a dynamic int/float literal
+/// (e.g. `+ 1`) is left unresolved in the plan and gets independently materialized to a default
+/// dtype at execution time, which can silently disagree with the dtype the schema declared.
+fn process_list_arithmetic(
+    type_left: DataType,
+    type_right: DataType,
+    node_left: Node,
+    node_right: Node,
+    op: Operator,
+    expr_arena: &mut Arena<AExpr>,
+) -> PolarsResult<Option<AExpr>> {
+    let Some(new_leaf) = list_arithmetic_leaf_supertype(op, &type_left, &type_right)? else {
+        return Ok(None);
+    };
+
+    let new_node_left = if type_left.leaf_dtype() != &new_leaf {
+        Some(expr_arena.add(AExpr::Cast {
+            expr: node_left,
+            dtype: type_left.cast_leaf(new_leaf.clone()),
+            options: CastOptions::NonStrict,
+        }))
+    } else {
+        None
+    };
+    let new_node_right = if type_right.leaf_dtype() != &new_leaf {
+        Some(expr_arena.add(AExpr::Cast {
+            expr: node_right,
+            dtype: type_right.cast_leaf(new_leaf),
+            options: CastOptions::NonStrict,
+        }))
+    } else {
+        None
+    };
+
+    if new_node_left.is_none() && new_node_right.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(AExpr::BinaryExpr {
+        left: new_node_left.unwrap_or(node_left),
+        op,
+        right: new_node_right.unwrap_or(node_right),
+    }))
 }
 
 #[cfg(any(
@@ -336,6 +384,20 @@ pub(super) fn process_binary(
         )
     {
         return process_struct_numeric_arithmetic(
+            type_left, type_right, node_left, node_right, op, expr_arena,
+        );
+    }
+
+    // List/array arithmetic needs each operand cast to its own leaf-supertype-preserving shape
+    // (e.g. a scalar literal gets cast to the leaf dtype, not wrapped in `List(..)`), which
+    // `coerced_binop_dtype`'s single shared-dtype result can't express for both sides at once.
+    if op.is_arithmetic()
+        && (type_left.is_list()
+            || type_right.is_list()
+            || type_left.is_array()
+            || type_right.is_array())
+    {
+        return process_list_arithmetic(
             type_left, type_right, node_left, node_right, op, expr_arena,
         );
     }

@@ -9,7 +9,7 @@ mod minterm_iter;
 pub(crate) mod or_factoring;
 pub mod predicates;
 mod scalar;
-mod schema;
+pub(crate) mod schema;
 mod traverse;
 
 use std::hash::{Hash, Hasher};

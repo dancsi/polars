@@ -1,6 +1,6 @@
 #[cfg(feature = "dtype-decimal")]
 use polars_compute::decimal::DEC128_MAX_PREC;
-use polars_core::series::arithmetic::NumericListOp;
+use polars_core::series::arithmetic::NumericOp;
 use polars_utils::format_pl_smallstr;
 use recursive::recursive;
 
@@ -487,6 +487,31 @@ fn func_args_to_fields(input: &[ExprIR], ctx: &ToFieldContext) -> PolarsResult<V
         .collect()
 }
 
+/// The leaf-dtype supertype for List/Array arithmetic between `left` and `right`, where either
+/// (but not both) may be a plain scalar/literal dtype rather than List/Array. Shared between
+/// schema resolution here and type coercion in `conversion::type_coercion::binary`, so that both
+/// agree with what the runtime list-arithmetic kernels (which use the same `NumericOp` rule) will
+/// actually produce. Returns `None` for operators without list-arithmetic semantics (e.g. plain
+/// bitwise ops), leaving those to whatever fallback the caller already has.
+pub(crate) fn list_arithmetic_leaf_supertype(
+    op: Operator,
+    left: &DataType,
+    right: &DataType,
+) -> PolarsResult<Option<DataType>> {
+    let numeric_op = match op {
+        Operator::Plus => NumericOp::Add,
+        Operator::Minus => NumericOp::Sub,
+        Operator::Multiply => NumericOp::Mul,
+        Operator::TrueDivide | Operator::RustDivide => NumericOp::Div,
+        Operator::FloorDivide => NumericOp::FloorDiv,
+        Operator::Modulus => NumericOp::Rem,
+        _ => return Ok(None),
+    };
+    Ok(Some(
+        numeric_op.try_get_leaf_supertype(left.leaf_dtype(), right.leaf_dtype())?,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn get_arithmetic_field(
     left: Node,
@@ -562,17 +587,19 @@ fn get_arithmetic_field(
                     // This currently doesn't cause any problems because the list arithmetic implementation checks and raises errors
                     // if the leaf types aren't numeric, but it means we don't raise an error until execution and the DSL schema
                     // may be incorrect.
-                    list_dtype.cast_leaf(NumericListOp::sub().try_get_leaf_supertype(
-                        list_dtype.leaf_dtype(),
-                        other_dtype.leaf_dtype(),
-                    )?)
+                    let new_leaf = match list_arithmetic_leaf_supertype(op, list_dtype, other_dtype)? {
+                        Some(dtype) => dtype,
+                        None => try_get_supertype(list_dtype.leaf_dtype(), other_dtype.leaf_dtype())?,
+                    };
+                    list_dtype.cast_leaf(new_leaf)
                 },
                 #[cfg(feature = "dtype-array")]
                 (list_dtype @ Array(..), other_dtype) | (other_dtype, list_dtype @ Array(..)) => {
-                    list_dtype.cast_leaf(try_get_supertype(
-                        list_dtype.leaf_dtype(),
-                        other_dtype.leaf_dtype(),
-                    )?)
+                    let new_leaf = match list_arithmetic_leaf_supertype(op, list_dtype, other_dtype)? {
+                        Some(dtype) => dtype,
+                        None => try_get_supertype(list_dtype.leaf_dtype(), other_dtype.leaf_dtype())?,
+                    };
+                    list_dtype.cast_leaf(new_leaf)
                 },
                 #[cfg(feature = "dtype-decimal")]
                 (Decimal(_, scale_left), Decimal(_, scale_right)) => {
@@ -623,17 +650,19 @@ fn get_arithmetic_field(
                     )
                 },
                 (list_dtype @ List(_), other_dtype) | (other_dtype, list_dtype @ List(_)) => {
-                    list_dtype.cast_leaf(NumericListOp::add().try_get_leaf_supertype(
-                        list_dtype.leaf_dtype(),
-                        other_dtype.leaf_dtype(),
-                    )?)
+                    let new_leaf = match list_arithmetic_leaf_supertype(op, list_dtype, other_dtype)? {
+                        Some(dtype) => dtype,
+                        None => try_get_supertype(list_dtype.leaf_dtype(), other_dtype.leaf_dtype())?,
+                    };
+                    list_dtype.cast_leaf(new_leaf)
                 },
                 #[cfg(feature = "dtype-array")]
                 (list_dtype @ Array(..), other_dtype) | (other_dtype, list_dtype @ Array(..)) => {
-                    list_dtype.cast_leaf(try_get_supertype(
-                        list_dtype.leaf_dtype(),
-                        other_dtype.leaf_dtype(),
-                    )?)
+                    let new_leaf = match list_arithmetic_leaf_supertype(op, list_dtype, other_dtype)? {
+                        Some(dtype) => dtype,
+                        None => try_get_supertype(list_dtype.leaf_dtype(), other_dtype.leaf_dtype())?,
+                    };
+                    list_dtype.cast_leaf(new_leaf)
                 },
                 #[cfg(feature = "dtype-decimal")]
                 (Decimal(_, scale_left), Decimal(_, scale_right)) => {
@@ -717,19 +746,21 @@ fn get_arithmetic_field(
                 // List<->primitive operations can be done directly after casting the to the primitive
                 // supertype for the primitive values on both sides.
                 (list_dtype @ List(_), other_dtype) | (other_dtype, list_dtype @ List(_)) => {
-                    let dtype = list_dtype.cast_leaf(try_get_supertype(
-                        list_dtype.leaf_dtype(),
-                        other_dtype.leaf_dtype(),
-                    )?);
+                    let new_leaf = match list_arithmetic_leaf_supertype(op, list_dtype, other_dtype)? {
+                        Some(dtype) => dtype,
+                        None => try_get_supertype(list_dtype.leaf_dtype(), other_dtype.leaf_dtype())?,
+                    };
+                    let dtype = list_dtype.cast_leaf(new_leaf);
                     left_field.coerce(dtype);
                     return Ok(left_field);
                 },
                 #[cfg(feature = "dtype-array")]
                 (list_dtype @ Array(..), other_dtype) | (other_dtype, list_dtype @ Array(..)) => {
-                    let dtype = list_dtype.cast_leaf(try_get_supertype(
-                        list_dtype.leaf_dtype(),
-                        other_dtype.leaf_dtype(),
-                    )?);
+                    let new_leaf = match list_arithmetic_leaf_supertype(op, list_dtype, other_dtype)? {
+                        Some(dtype) => dtype,
+                        None => try_get_supertype(list_dtype.leaf_dtype(), other_dtype.leaf_dtype())?,
+                    };
+                    let dtype = list_dtype.cast_leaf(new_leaf);
                     left_field.coerce(dtype);
                     return Ok(left_field);
                 },

@@ -12,7 +12,7 @@ use crate::series::ChunkedArray;
 use crate::utils::try_get_supertype;
 
 #[derive(Debug, Clone)]
-pub(super) enum NumericOp {
+pub enum NumericOp {
     Add,
     Sub,
     Mul,
@@ -33,7 +33,10 @@ impl NumericOp {
         }
     }
 
-    pub(super) fn try_get_leaf_supertype(
+    /// The leaf/primitive-value supertype for this operator, given the leaf dtypes of the two
+    /// operands. Used both by the runtime list/array arithmetic kernels and by schema resolution
+    /// and type coercion in polars-plan, so that all three agree on the resulting dtype.
+    pub fn try_get_leaf_supertype(
         &self,
         prim_dtype_lhs: &DataType,
         prim_dtype_rhs: &DataType,
