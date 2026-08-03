@@ -173,18 +173,24 @@ impl InternedExprCmp {
 
         Self { expr_ids }
     }
+
+    fn expr_id(&self, node: Node) -> DeduplicationId<AExpr> {
+        *self.expr_ids.get(&node).unwrap_or_else(|| {
+            panic!("expression node {node:?} was not interned by InternedExprCmp::new")
+        })
+    }
 }
 
 impl ExpressionComparator for InternedExprCmp {
     fn equals(&self, lhs: &ExprIR, rhs: &ExprIR) -> bool {
-        self.expr_ids[&lhs.node()] == self.expr_ids[&rhs.node()]
+        self.expr_id(lhs.node()) == self.expr_id(rhs.node())
             && lhs.output_name_inner() == rhs.output_name_inner()
     }
 }
 
 impl ExpressionHasher for InternedExprCmp {
     fn hash_expr<H: Hasher>(&self, expr: &ExprIR, state: &mut H) {
-        self.expr_ids[&expr.node()].hash(state);
+        self.expr_id(expr.node()).hash(state);
         expr.output_name_inner().hash(state);
     }
 }
