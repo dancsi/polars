@@ -53,10 +53,8 @@ impl IR {
                 std::mem::discriminant(predicate).hash(state);
                 match predicate {
                     PythonPredicate::None => {},
-                    PythonPredicate::PyArrow(p) => {
-                        format!("{:?}", p).hash(state);
-                        p.has_residual.hash(state);
-                    },
+                    // A PyArrow predicate always compares as unequal, so we can hash it however we want
+                    PythonPredicate::PyArrow(p) => p.has_residual.hash(state),
                     PythonPredicate::Polars(e) => expr_hash.hash_expr(e, state),
                 }
                 validate_schema.hash(state);
