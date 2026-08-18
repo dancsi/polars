@@ -1122,3 +1122,107 @@ pub fn repeat(args: &[Column]) -> PolarsResult<Column> {
 pub fn dynamic_pred(columns: &[Column], pred: &DynamicPredWeakRef) -> PolarsResult<Column> {
     pred.evaluate(columns)
 }
+
+#[cfg(feature = "cutqcut")]
+pub(super) fn bin_intervals(
+    s: &Column,
+    breaks: Series,
+    labels: Option<Vec<PlSmallStr>>,
+    include_intervals: bool,
+    right_closed: bool,
+) -> PolarsResult<Column> {
+    polars_ops::prelude::bin_intervals(
+        s.as_materialized_series(),
+        &breaks,
+        labels.as_deref(),
+        include_intervals,
+        right_closed,
+    )
+    .map(Column::from)
+}
+
+#[cfg(feature = "cutqcut")]
+pub(super) fn bin_intervals_uniform(
+    s: &Column,
+    n_bins: usize,
+    labels: Option<Vec<PlSmallStr>>,
+    include_intervals: bool,
+    right_closed: bool,
+) -> PolarsResult<Column> {
+    polars_ops::prelude::bin_intervals_uniform(
+        s.as_materialized_series(),
+        n_bins,
+        labels.as_deref(),
+        include_intervals,
+        right_closed,
+    )
+    .map(Column::from)
+}
+
+#[cfg(feature = "cutqcut")]
+pub(super) fn bin_quantiles(
+    s: &Column,
+    probs: Vec<f64>,
+    labels: Option<Vec<PlSmallStr>>,
+    include_intervals: bool,
+    right_closed: bool,
+) -> PolarsResult<Column> {
+    polars_ops::prelude::bin_quantiles(
+        s.as_materialized_series(),
+        &probs,
+        labels.as_deref(),
+        include_intervals,
+        right_closed,
+    )
+    .map(Column::from)
+}
+
+#[cfg(feature = "cutqcut")]
+pub(super) fn bin_quantiles_uniform(
+    s: &Column,
+    n_bins: usize,
+    labels: Option<Vec<PlSmallStr>>,
+    include_intervals: bool,
+    right_closed: bool,
+) -> PolarsResult<Column> {
+    polars_ops::prelude::bin_quantiles_uniform(
+        s.as_materialized_series(),
+        n_bins,
+        labels.as_deref(),
+        include_intervals,
+        right_closed,
+    )
+    .map(Column::from)
+}
+
+#[cfg(feature = "cutqcut")]
+pub(super) fn bin_ranks(
+    s: &Column,
+    fractions: Vec<f64>,
+    labels: Option<Vec<PlSmallStr>>,
+    include_intervals: bool,
+) -> PolarsResult<Column> {
+    polars_ops::prelude::bin_ranks(
+        s.as_materialized_series(),
+        &fractions,
+        labels.as_deref(),
+        include_intervals,
+    )
+    .map(Column::from)
+}
+
+#[cfg(feature = "cutqcut")]
+pub(super) fn bin_ranks_uniform(
+    s: &Column,
+    n_bins: usize,
+    labels: Option<Vec<PlSmallStr>>,
+    include_intervals: bool,
+) -> PolarsResult<Column> {
+    polars_ops::prelude::bin_ranks_uniform(
+        s.as_materialized_series(),
+        n_bins,
+        labels.as_deref(),
+        include_intervals,
+    )
+    .map(Column::from)
+}

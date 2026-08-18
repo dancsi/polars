@@ -5,6 +5,8 @@ use polars::lazy::dsl;
 use polars::prelude::*;
 use polars::series::ops::NullBehavior;
 use polars_core::chunked_array::cast::CastOptions;
+#[cfg(feature = "cutqcut")]
+use polars_plan::dsl::{BinMethod, BinOptions};
 use polars_plan::plans::predicates::aexpr_to_skip_batch_predicate;
 use polars_plan::plans::{
     AExprSorted, ExprToIRContext, RowEncodingVariant, node_to_expr, to_expr_ir,
@@ -18,7 +20,7 @@ use super::selector::PySelector;
 use crate::conversion::{Wrap, parse_fill_null_strategy};
 use crate::error::PyPolarsErr;
 use crate::utils::EnterPolarsExt;
-use crate::{PyDataType, PyExpr};
+use crate::{PyDataType, PyExpr, PySeries};
 
 #[pymethods]
 impl PyExpr {
@@ -239,6 +241,92 @@ impl PyExpr {
                 allow_duplicates,
                 include_breaks,
             )
+            .into()
+    }
+
+    #[cfg(feature = "cutqcut")]
+    #[pyo3(signature = (intervals, labels, include_intervals, right_closed))]
+    fn bin_intervals(
+        &self,
+        intervals: PySeries,
+        labels: Option<Vec<String>>,
+        include_intervals: bool,
+        right_closed: bool,
+    ) -> Self {
+        let breaks = intervals.series.into_inner();
+        self.inner
+            .clone()
+            .bin(BinOptions {
+                method: BinMethod::intervals(breaks, right_closed),
+                labels: bin_labels(labels),
+                include_intervals,
+            })
+            .into()
+    }
+
+    #[cfg(feature = "cutqcut")]
+    #[pyo3(signature = (n_bins, labels, include_intervals, right_closed))]
+    fn bin_intervals_uniform(
+        &self,
+        n_bins: usize,
+        labels: Option<Vec<String>>,
+        include_intervals: bool,
+        right_closed: bool,
+    ) -> Self {
+        self.inner
+            .clone()
+            .bin(BinOptions {
+                method: BinMethod::UniformIntervals {
+                    n_bins,
+                    right_closed,
+                },
+                labels: bin_labels(labels),
+                include_intervals,
+            })
+            .into()
+    }
+
+    #[cfg(feature = "cutqcut")]
+    #[pyo3(signature = (quantiles, labels, include_intervals, right_closed))]
+    fn bin_quantiles(
+        &self,
+        quantiles: Vec<f64>,
+        labels: Option<Vec<String>>,
+        include_intervals: bool,
+        right_closed: bool,
+    ) -> Self {
+        self.inner
+            .clone()
+            .bin(BinOptions {
+                method: BinMethod::Quantiles {
+                    probs: quantiles,
+                    right_closed,
+                },
+                labels: bin_labels(labels),
+                include_intervals,
+            })
+            .into()
+    }
+
+    #[cfg(feature = "cutqcut")]
+    #[pyo3(signature = (n_bins, labels, include_intervals, right_closed))]
+    fn bin_quantiles_uniform(
+        &self,
+        n_bins: usize,
+        labels: Option<Vec<String>>,
+        include_intervals: bool,
+        right_closed: bool,
+    ) -> Self {
+        self.inner
+            .clone()
+            .bin(BinOptions {
+                method: BinMethod::UniformQuantiles {
+                    n_bins,
+                    right_closed,
+                },
+                labels: bin_labels(labels),
+                include_intervals,
+            })
             .into()
     }
 
@@ -1085,4 +1173,9 @@ impl PyExpr {
     fn new_selector(selector: PySelector) -> Self {
         Expr::Selector(selector.inner).into()
     }
+}
+
+#[cfg(feature = "cutqcut")]
+fn bin_labels(labels: Option<Vec<String>>) -> Option<Vec<PlSmallStr>> {
+    labels.map(|l| l.into_iter().map(PlSmallStr::from_string).collect())
 }

@@ -15,6 +15,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    Literal,
     NoReturn,
     TypeVar,
 )
@@ -4890,6 +4891,227 @@ class Expr:
                 quantiles, labels, left_closed, allow_duplicates, include_breaks
             )
 
+        return wrap_expr(pyexpr)
+
+    @unstable()
+    def bin_intervals(
+        self,
+        intervals: Sequence[Any] | Series | int,
+        *,
+        labels: Sequence[str_] | Literal[False],
+        include_intervals: bool = False,
+        right_closed: bool = False,
+    ) -> Expr:
+        """
+        Bin values into discrete intervals delimited by breakpoints.
+
+        .. engine-support:: in-memory, streaming
+
+        .. warning::
+            This functionality is considered **unstable**. It may be changed
+            at any point without it being considered a breaking change.
+
+        Parameters
+        ----------
+        intervals
+            Either a strictly ascending sequence of breakpoints, or a positive integer
+            `n` giving a number of equal-width bins spanning `[min, max]`. Explicit
+            breakpoints may be of any orderable data type and are cast to the data type
+            of this expression. Passing an integer requires a numeric input and produces
+            `Float64` interval boundaries.
+        labels
+            Names of the bins, or `False` to return the integer bin index. The number of
+            labels must equal the number of bins, which is one more than the number of
+            breakpoints.
+        include_intervals
+            Return a struct with fields `bin`, `left` and `right` rather than just the
+            bin. `left` is null for the first bin and `right` is null for the last.
+        right_closed
+            Make the bins right-closed, `(left, right]`, instead of left-closed,
+            `[left, right)`.
+
+        Returns
+        -------
+        Expr
+            Expression of data type :class:`Enum`, or :class:`UInt32` if `labels` is
+            `False`, or :class:`Struct` if `include_intervals` is set.
+
+        Notes
+        -----
+        With explicit breakpoints this is an elementwise operation, so `over` has no
+        effect on the result. With an integer number of bins the breakpoints are derived
+        from the data and are therefore computed *per group* within
+        :meth:`group_by`/:meth:`over`.
+
+        NaN sorts above every other float, so it lands in the last bin rather than
+        becoming null.
+
+        See Also
+        --------
+        bin_quantiles
+
+        Examples
+        --------
+        >>> df = pl.DataFrame({"foo": [-2, -1, 0, 1, 2]})
+        >>> df.with_columns(
+        ...     pl.col("foo")
+        ...     .bin_intervals([-1, 1], labels=["a", "b", "c"])
+        ...     .alias("bin")
+        ... )
+        shape: (5, 2)
+        ┌─────┬──────┐
+        │ foo ┆ bin  │
+        │ --- ┆ ---  │
+        │ i64 ┆ enum │
+        ╞═════╪══════╡
+        │ -2  ┆ a    │
+        │ -1  ┆ b    │
+        │ 0   ┆ b    │
+        │ 1   ┆ c    │
+        │ 2   ┆ c    │
+        └─────┴──────┘
+
+        Return the interval boundaries alongside the bin. They keep the input data type.
+
+        >>> df.with_columns(
+        ...     pl.col("foo")
+        ...     .bin_intervals([-1, 1], labels=False, include_intervals=True)
+        ...     .alias("bin")
+        ... ).unnest("bin")
+        shape: (5, 4)
+        ┌─────┬─────┬──────┬───────┐
+        │ foo ┆ bin ┆ left ┆ right │
+        │ --- ┆ --- ┆ ---  ┆ ---   │
+        │ i64 ┆ u32 ┆ i64  ┆ i64   │
+        ╞═════╪═════╪══════╪═══════╡
+        │ -2  ┆ 0   ┆ null ┆ -1    │
+        │ -1  ┆ 1   ┆ -1   ┆ 1     │
+        │ 0   ┆ 1   ┆ -1   ┆ 1     │
+        │ 1   ┆ 2   ┆ 1    ┆ null  │
+        │ 2   ┆ 2   ┆ 1    ┆ null  │
+        └─────┴─────┴──────┴───────┘
+        """
+        labels_arg = None if labels is False else list(labels)
+        if isinstance(intervals, int):
+            pyexpr = self._pyexpr.bin_intervals_uniform(
+                intervals, labels_arg, include_intervals, right_closed
+            )
+        else:
+            breaks = (
+                intervals
+                if isinstance(intervals, pl.Series)
+                else pl.Series("breaks", intervals)
+            )
+            pyexpr = self._pyexpr.bin_intervals(
+                breaks._s, labels_arg, include_intervals, right_closed
+            )
+        return wrap_expr(pyexpr)
+
+    @unstable()
+    def bin_quantiles(
+        self,
+        quantiles: Sequence[float] | int,
+        *,
+        labels: Sequence[str_] | Literal[False],
+        include_intervals: bool = False,
+        right_closed: bool = False,
+    ) -> Expr:
+        """
+        Bin values into discrete intervals delimited by quantiles of the data.
+
+        .. engine-support:: in-memory
+
+        .. warning::
+            This functionality is considered **unstable**. It may be changed
+            at any point without it being considered a breaking change.
+
+        Parameters
+        ----------
+        quantiles
+            Either a strictly ascending sequence of quantile probabilities in `[0, 1]`,
+            or a positive integer `n` giving a number of equiprobable bins. The value
+            breakpoint for probability `q` is the element at position
+            `floor(q * (len - 1))` of the sorted values.
+        labels
+            Names of the bins, or `False` to return the integer bin index. The number of
+            labels must equal the number of bins, which is one more than the number of
+            probabilities.
+        include_intervals
+            Return a struct with fields `bin`, `left` and `right` rather than just the
+            bin. `left` is null for the first bin and `right` is null for the last.
+        right_closed
+            Make the bins right-closed, `(left, right]`, instead of left-closed,
+            `[left, right)`.
+
+        Returns
+        -------
+        Expr
+            Expression of data type :class:`Enum`, or :class:`UInt32` if `labels` is
+            `False`, or :class:`Struct` if `include_intervals` is set.
+
+        Notes
+        -----
+        The breakpoints are derived from the data, so within :meth:`group_by` or
+        :meth:`over` they are computed *per group*.
+
+        Because breakpoints are chosen positionally rather than by interpolation, the
+        interval boundaries are always values present in the input and carry its data
+        type. Passing an integer is *not* equivalent to passing the corresponding
+        probabilities: `(i + 1) / n` is generally not representable as a float, so the
+        integer form is computed exactly instead.
+
+        See Also
+        --------
+        bin_intervals
+
+        Examples
+        --------
+        >>> df = pl.DataFrame({"foo": [-2, -1, 0, 1, 2]})
+        >>> df.with_columns(
+        ...     pl.col("foo")
+        ...     .bin_quantiles([0.25, 0.75], labels=["a", "b", "c"])
+        ...     .alias("bin")
+        ... )
+        shape: (5, 2)
+        ┌─────┬──────┐
+        │ foo ┆ bin  │
+        │ --- ┆ ---  │
+        │ i64 ┆ enum │
+        ╞═════╪══════╡
+        │ -2  ┆ a    │
+        │ -1  ┆ b    │
+        │ 0   ┆ b    │
+        │ 1   ┆ c    │
+        │ 2   ┆ c    │
+        └─────┴──────┘
+
+        Divide into a number of equiprobable bins.
+
+        >>> df.with_columns(
+        ...     pl.col("foo").bin_quantiles(2, labels=["low", "high"]).alias("bin")
+        ... )
+        shape: (5, 2)
+        ┌─────┬──────┐
+        │ foo ┆ bin  │
+        │ --- ┆ ---  │
+        │ i64 ┆ enum │
+        ╞═════╪══════╡
+        │ -2  ┆ low  │
+        │ -1  ┆ low  │
+        │ 0   ┆ high │
+        │ 1   ┆ high │
+        │ 2   ┆ high │
+        └─────┴──────┘
+        """
+        labels_arg = None if labels is False else list(labels)
+        if isinstance(quantiles, int):
+            pyexpr = self._pyexpr.bin_quantiles_uniform(
+                quantiles, labels_arg, include_intervals, right_closed
+            )
+        else:
+            pyexpr = self._pyexpr.bin_quantiles(
+                list(quantiles), labels_arg, include_intervals, right_closed
+            )
         return wrap_expr(pyexpr)
 
     def rle(self) -> Expr:

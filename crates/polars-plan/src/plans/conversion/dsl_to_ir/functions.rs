@@ -7,6 +7,8 @@ use polars_utils::option::OptionTry;
 use super::expr_to_ir::ExprToIRContext;
 use super::*;
 use crate::constants::get_literal_name;
+#[cfg(feature = "cutqcut")]
+use crate::dsl::BinMethod;
 use crate::dsl::{Expr, FunctionExpr};
 use crate::plans::conversion::dsl_to_ir::expr_to_ir::to_expr_irs;
 use crate::plans::{AExpr, IRFunctionExpr};
@@ -971,6 +973,93 @@ pub(super) fn convert_functions(
             allow_duplicates,
             include_breaks,
         },
+        #[cfg(feature = "cutqcut")]
+        F::Bin(mut options) => {
+            // All argument validation happens here rather than in the kernel, so that
+            // errors surface at `collect_schema()`. Casting the breakpoints here also
+            // establishes the invariant that `Intervals` holds the input dtype, which
+            // is what lets `schema.rs` report the boundary dtype without seeing data.
+            let input_dtype = e[0].dtype(ctx.schema, ctx.arena)?.clone();
+            let name = options.method.name();
+
+            options.method = match options.method {
+                BinMethod::Intervals {
+                    breaks,
+                    right_closed,
+                } => {
+                    let breaks = match breaks.value() {
+                        AnyValue::List(s) => s.clone(),
+                        _ => unreachable!("bin_intervals breakpoints must be a List value"),
+                    };
+                    polars_ensure!(
+                        breaks.null_count() == 0,
+                        ComputeError: "`{}` breakpoints cannot contain nulls", name
+                    );
+                    let given_dtype = breaks.dtype().clone();
+                    let cast = breaks
+                        .cast_with_options(&input_dtype, CastOptions::Strict)
+                        .map_err(|_| not_representable(name, &given_dtype, &input_dtype))?;
+                    // A strict cast rejects overflow but still truncates, so 1.5 would
+                    // silently become 1 and move values between bins. Round-trip to
+                    // catch any change in value.
+                    let round_trip = cast
+                        .cast_with_options(&given_dtype, CastOptions::Strict)
+                        .map_err(|_| not_representable(name, &given_dtype, &input_dtype))?;
+                    polars_ensure!(
+                        round_trip.equals_missing(&breaks),
+                        InvalidOperation:
+                        "`{}` breakpoints of dtype `{}` are not exactly representable in \
+                         the input dtype `{}`",
+                        name, given_dtype, input_dtype
+                    );
+                    let breaks = cast;
+                    ensure_strictly_ascending(&breaks, name, "intervals")?;
+                    BinMethod::intervals(breaks, right_closed)
+                },
+                BinMethod::UniformIntervals {
+                    n_bins,
+                    right_closed,
+                } => {
+                    polars_ensure!(
+                        n_bins >= 1,
+                        ComputeError: "`{}` requires at least one bin", name
+                    );
+                    polars_ensure!(
+                        input_dtype.is_primitive_numeric(),
+                        InvalidOperation:
+                        "`{}` with a number of bins requires a numeric input, got `{}`",
+                        name, input_dtype
+                    );
+                    BinMethod::UniformIntervals {
+                        n_bins,
+                        right_closed,
+                    }
+                },
+                BinMethod::Quantiles {
+                    probs,
+                    right_closed,
+                } => {
+                    ensure_ascending_unit_interval(&probs, name, "quantiles")?;
+                    BinMethod::Quantiles {
+                        probs,
+                        right_closed,
+                    }
+                },
+                BinMethod::Ranks { fractions } => {
+                    ensure_ascending_unit_interval(&fractions, name, "ranks")?;
+                    BinMethod::Ranks { fractions }
+                },
+                m @ (BinMethod::UniformQuantiles { .. } | BinMethod::UniformRanks { .. }) => {
+                    polars_ensure!(
+                        m.n_bins() >= 1,
+                        ComputeError: "`{}` requires at least one bin", name
+                    );
+                    m
+                },
+            };
+
+            I::Bin(options)
+        },
         #[cfg(feature = "rle")]
         F::RLE => I::RLE,
         #[cfg(feature = "rle")]
@@ -1173,4 +1262,45 @@ pub(super) fn convert_functions(
         options,
     };
     Ok((ctx.arena.add(ae_function), output_name))
+}
+
+/// A binning argument must be strictly ascending: a repeated breakpoint would make one of
+/// the labels unreachable.
+#[cfg(feature = "cutqcut")]
+fn ensure_strictly_ascending(s: &Series, name: &str, arg: &str) -> PolarsResult<()> {
+    let n = s.len();
+    if n < 2 {
+        return Ok(());
+    }
+    let non_increasing = s.slice(1, n - 1).lt_eq(&s.slice(0, n - 1))?;
+    polars_ensure!(
+        !non_increasing.any(),
+        ComputeError: "`{}` requires `{}` to be strictly ascending", name, arg
+    );
+    Ok(())
+}
+
+#[cfg(feature = "cutqcut")]
+fn ensure_ascending_unit_interval(xs: &[f64], name: &str, arg: &str) -> PolarsResult<()> {
+    for x in xs {
+        polars_ensure!(
+            (0.0..=1.0).contains(x),
+            ComputeError: "`{}` requires `{}` to be between 0.0 and 1.0, got {}", name, arg, x
+        );
+    }
+    polars_ensure!(
+        xs.windows(2).all(|w| w[0] < w[1]),
+        ComputeError: "`{}` requires `{}` to be strictly ascending", name, arg
+    );
+    Ok(())
+}
+
+#[cfg(feature = "cutqcut")]
+fn not_representable(name: &str, given: &DataType, input: &DataType) -> PolarsError {
+    polars_err!(
+        InvalidOperation:
+        "`{}` breakpoints of dtype `{}` are not exactly representable in the input \
+         dtype `{}`",
+        name, given, input
+    )
 }

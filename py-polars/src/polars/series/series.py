@@ -2717,6 +2717,125 @@ class Series:
         └─────┴────────────┴────────────┘
         """
 
+    @unstable()
+    def bin_intervals(
+        self,
+        intervals: Sequence[Any] | Series | int,
+        *,
+        labels: Sequence[str_] | Literal[False],
+        include_intervals: bool = False,
+        right_closed: bool = False,
+    ) -> Series:
+        """
+        Bin values into discrete intervals delimited by breakpoints.
+
+        .. warning::
+            This functionality is considered **unstable**. It may be changed
+            at any point without it being considered a breaking change.
+
+        Parameters
+        ----------
+        intervals
+            Either a strictly ascending sequence of breakpoints, or a positive integer
+            `n` giving a number of equal-width bins spanning `[min, max]`. Explicit
+            breakpoints may be of any orderable data type and are cast to this Series'
+            data type. Passing an integer requires a numeric input and produces
+            `Float64` interval boundaries.
+        labels
+            Names of the bins, or `False` to return the integer bin index. The number of
+            labels must equal the number of bins, which is one more than the number of
+            breakpoints.
+        include_intervals
+            Return a struct with fields `bin`, `left` and `right` rather than just the
+            bin. `left` is null for the first bin and `right` is null for the last.
+        right_closed
+            Make the bins right-closed, `(left, right]`, instead of left-closed,
+            `[left, right)`.
+
+        Returns
+        -------
+        Series
+            Series of data type :class:`Enum`, or :class:`UInt32` if `labels`
+            is `False`, or :class:`Struct` if `include_intervals` is set.
+
+        See Also
+        --------
+        bin_quantiles
+
+        Examples
+        --------
+        >>> s = pl.Series("foo", [-2, -1, 0, 1, 2])
+        >>> s.bin_intervals([-1, 1], labels=["a", "b", "c"])
+        shape: (5,)
+        Series: 'foo' [enum]
+        [
+            "a"
+            "b"
+            "b"
+            "c"
+            "c"
+        ]
+        """
+
+    @unstable()
+    def bin_quantiles(
+        self,
+        quantiles: Sequence[float] | int,
+        *,
+        labels: Sequence[str_] | Literal[False],
+        include_intervals: bool = False,
+        right_closed: bool = False,
+    ) -> Series:
+        """
+        Bin values into discrete intervals delimited by quantiles of the data.
+
+        .. warning::
+            This functionality is considered **unstable**. It may be changed
+            at any point without it being considered a breaking change.
+
+        Parameters
+        ----------
+        quantiles
+            Either a strictly ascending sequence of quantile probabilities in `[0, 1]`,
+            or a positive integer `n` giving a number of equiprobable bins. The value
+            breakpoint for probability `q` is the element at position
+            `floor(q * (len - 1))` of the sorted values.
+        labels
+            Names of the bins, or `False` to return the integer bin index. The number of
+            labels must equal the number of bins, which is one more than the number of
+            probabilities.
+        include_intervals
+            Return a struct with fields `bin`, `left` and `right` rather than just the
+            bin. `left` is null for the first bin and `right` is null for the last.
+        right_closed
+            Make the bins right-closed, `(left, right]`, instead of left-closed,
+            `[left, right)`.
+
+        Returns
+        -------
+        Series
+            Series of data type :class:`Enum`, or :class:`UInt32` if `labels`
+            is `False`, or :class:`Struct` if `include_intervals` is set.
+
+        See Also
+        --------
+        bin_intervals
+
+        Examples
+        --------
+        >>> s = pl.Series("foo", [-2, -1, 0, 1, 2])
+        >>> s.bin_quantiles([0.25, 0.75], labels=["a", "b", "c"])
+        shape: (5,)
+        Series: 'foo' [enum]
+        [
+            "a"
+            "b"
+            "b"
+            "c"
+            "c"
+        ]
+        """
+
     def rle(self) -> Series:
         """
         Compress the Series data using run-length encoding.

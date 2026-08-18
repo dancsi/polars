@@ -10,6 +10,8 @@ Manipulation/selection
     Expr.arg_sort
     Expr.arg_true
     Expr.backward_fill
+    Expr.bin_intervals
+    Expr.bin_quantiles
     Expr.bottom_k
     Expr.bottom_k_by
     Expr.cast
