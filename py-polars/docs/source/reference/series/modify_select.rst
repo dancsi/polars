@@ -14,6 +14,7 @@ Manipulation/selection
     Series.backward_fill
     Series.bin_intervals
     Series.bin_quantiles
+    Series.bin_ranks
     Series.bottom_k
     Series.bottom_k_by
     Series.cast

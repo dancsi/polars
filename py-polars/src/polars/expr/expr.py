@@ -5114,6 +5114,113 @@ class Expr:
             )
         return wrap_expr(pyexpr)
 
+    @unstable()
+    def bin_ranks(
+        self,
+        ranks: Sequence[float] | int,
+        *,
+        labels: Sequence[str_] | Literal[False],
+        include_intervals: bool = False,
+    ) -> Expr:
+        """
+        Bin values by their position in sorted order.
+
+        .. engine-support:: in-memory
+
+        .. warning::
+            This functionality is considered **unstable**. It may be changed
+            at any point without it being considered a breaking change.
+
+        Parameters
+        ----------
+        ranks
+            Either a strictly ascending sequence of cumulative fractions in `[0, 1]`, or
+            a positive integer `n` giving a number of bins of near-equal size. With
+            explicit fractions, bin `i` holds `ranks[i + 1] - ranks[i]` of the values;
+            with an integer, each bin holds `k` or `k + 1` values and the earlier bins
+            are the larger ones.
+        labels
+            Names of the bins, or `False` to return the integer bin index. The number of
+            labels must equal the number of bins, which is one more than the number of
+            fractions.
+        include_intervals
+            Return a struct with fields `bin`, `left` and `right` rather than just the
+            bin. `left` is null for the first bin and `right` is null for the last.
+
+        Returns
+        -------
+        Expr
+            Expression of data type :class:`Enum`, or :class:`UInt32` if `labels` is
+            `False`, or :class:`Struct` if `include_intervals` is set.
+
+        Notes
+        -----
+        Unlike :meth:`bin_intervals` and :meth:`bin_quantiles`, membership is decided by
+        *position* rather than by value. Bins therefore always have the requested sizes,
+        and equal values may be split across adjacent bins according to their order in
+        the input. There is consequently no `right_closed` parameter, since there is no
+        value boundary to close on.
+
+        `left` and `right` are still actual values from the input, not ranks, and carry
+        its data type.
+
+        Because ties are broken by input order, this expression observes the order of
+        its input, and within :meth:`group_by` or :meth:`over` the bins are computed
+        per group.
+
+        See Also
+        --------
+        bin_intervals
+        bin_quantiles
+
+        Examples
+        --------
+        Split into a bottom 20%, a middle 30% and 30%, and a top 20%.
+
+        >>> df = pl.DataFrame({"foo": list(range(10))})
+        >>> df.with_columns(
+        ...     pl.col("foo").bin_ranks([0.2, 0.5, 0.8], labels=False).alias("bin")
+        ... ).group_by("bin").len().sort("bin")
+        shape: (4, 2)
+        ┌─────┬─────┐
+        │ bin ┆ len │
+        │ --- ┆ --- │
+        │ u32 ┆ u32 │
+        ╞═════╪═════╡
+        │ 0   ┆ 2   │
+        │ 1   ┆ 3   │
+        │ 2   ┆ 3   │
+        │ 3   ┆ 2   │
+        └─────┴─────┘
+
+        With an integer the earlier bins take the remainder, so 14 values over 4 bins
+        are split 4 + 4 + 3 + 3.
+
+        >>> df = pl.DataFrame({"foo": list(range(14))})
+        >>> df.with_columns(
+        ...     pl.col("foo").bin_ranks(4, labels=False).alias("bin")
+        ... ).group_by("bin").len().sort("bin")
+        shape: (4, 2)
+        ┌─────┬─────┐
+        │ bin ┆ len │
+        │ --- ┆ --- │
+        │ u32 ┆ u32 │
+        ╞═════╪═════╡
+        │ 0   ┆ 4   │
+        │ 1   ┆ 4   │
+        │ 2   ┆ 3   │
+        │ 3   ┆ 3   │
+        └─────┴─────┘
+        """
+        labels_arg = None if labels is False else list(labels)
+        if isinstance(ranks, int):
+            pyexpr = self._pyexpr.bin_ranks_uniform(
+                ranks, labels_arg, include_intervals
+            )
+        else:
+            pyexpr = self._pyexpr.bin_ranks(list(ranks), labels_arg, include_intervals)
+        return wrap_expr(pyexpr)
+
     def rle(self) -> Expr:
         """
         Compress the column data using run-length encoding.

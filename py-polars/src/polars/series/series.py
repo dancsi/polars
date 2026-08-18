@@ -2836,6 +2836,67 @@ class Series:
         ]
         """
 
+    @unstable()
+    def bin_ranks(
+        self,
+        ranks: Sequence[float] | int,
+        *,
+        labels: Sequence[str_] | Literal[False],
+        include_intervals: bool = False,
+    ) -> Series:
+        """
+        Bin values by their position in sorted order.
+
+        .. warning::
+            This functionality is considered **unstable**. It may be changed
+            at any point without it being considered a breaking change.
+
+        Parameters
+        ----------
+        ranks
+            Either a strictly ascending sequence of cumulative fractions in `[0, 1]`, or
+            a positive integer `n` giving a number of bins of near-equal size. With
+            explicit fractions, bin `i` holds `ranks[i + 1] - ranks[i]` of the values;
+            with an integer, each bin holds `k` or `k + 1` values and the earlier bins
+            are the larger ones.
+        labels
+            Names of the bins, or `False` to return the integer bin index. The number of
+            labels must equal the number of bins, which is one more than the number of
+            fractions.
+        include_intervals
+            Return a struct with fields `bin`, `left` and `right` rather than just the
+            bin. `left` is null for the first bin and `right` is null for the last.
+
+        Returns
+        -------
+        Series
+            Series of data type :class:`Enum`, or :class:`UInt32` if `labels`
+            is `False`, or :class:`Struct` if `include_intervals` is set.
+
+        Notes
+        -----
+        Membership is decided by *position* rather than by value, so bins always have
+        the requested sizes and equal values may be split across adjacent bins.
+
+        See Also
+        --------
+        bin_intervals
+        bin_quantiles
+
+        Examples
+        --------
+        >>> s = pl.Series("foo", [10, 20, 30, 40])
+        >>> s.bin_ranks(2, labels=["low", "high"])
+        shape: (4,)
+        Series: 'foo' [enum]
+        [
+            "low"
+            "low"
+            "high"
+            "high"
+        ]
+        """
+
     def rle(self) -> Series:
         """
         Compress the Series data using run-length encoding.

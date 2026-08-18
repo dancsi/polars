@@ -12,6 +12,7 @@ Manipulation/selection
     Expr.backward_fill
     Expr.bin_intervals
     Expr.bin_quantiles
+    Expr.bin_ranks
     Expr.bottom_k
     Expr.bottom_k_by
     Expr.cast

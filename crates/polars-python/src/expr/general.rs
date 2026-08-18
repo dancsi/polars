@@ -330,6 +330,42 @@ impl PyExpr {
             .into()
     }
 
+    #[cfg(feature = "cutqcut")]
+    #[pyo3(signature = (ranks, labels, include_intervals))]
+    fn bin_ranks(
+        &self,
+        ranks: Vec<f64>,
+        labels: Option<Vec<String>>,
+        include_intervals: bool,
+    ) -> Self {
+        self.inner
+            .clone()
+            .bin(BinOptions {
+                method: BinMethod::Ranks { fractions: ranks },
+                labels: bin_labels(labels),
+                include_intervals,
+            })
+            .into()
+    }
+
+    #[cfg(feature = "cutqcut")]
+    #[pyo3(signature = (n_bins, labels, include_intervals))]
+    fn bin_ranks_uniform(
+        &self,
+        n_bins: usize,
+        labels: Option<Vec<String>>,
+        include_intervals: bool,
+    ) -> Self {
+        self.inner
+            .clone()
+            .bin(BinOptions {
+                method: BinMethod::UniformRanks { n_bins },
+                labels: bin_labels(labels),
+                include_intervals,
+            })
+            .into()
+    }
+
     #[cfg(feature = "rle")]
     fn rle(&self) -> Self {
         self.inner.clone().rle().into()
