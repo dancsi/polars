@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 import polars as pl
-from polars.exceptions import ComputeError, InvalidOperationError, ShapeError
+from polars.exceptions import ComputeError, ShapeError
 from polars.testing import assert_frame_equal, assert_series_equal
 
 
@@ -221,11 +221,19 @@ def test_bin_ranks_all_null(include_intervals: bool) -> None:
         )
 
 
-def test_bin_ranks_categorical_raises() -> None:
-    s = pl.Series("a", ["a", "b"], dtype=pl.Categorical)
+def test_bin_ranks_enum_uses_declaration_order() -> None:
+    dtype = pl.Enum(["zebra", "apple", "mango"])
+    s = pl.Series("a", ["mango", "zebra", "apple"], dtype=dtype)
 
-    with pytest.raises(InvalidOperationError, match="not supported"):
-        s.bin_ranks(2, labels=False)
+    # Positions in declaration order: zebra is 0, apple is 1, mango is 2.
+    assert s.bin_ranks(3, labels=False).to_list() == [2, 0, 1]
+
+
+def test_bin_ranks_categorical_uses_lexical_order() -> None:
+    s = pl.Series("a", ["mango", "zebra", "apple"], dtype=pl.Categorical)
+
+    # Positions in lexical order: apple is 0, mango is 1, zebra is 2.
+    assert s.bin_ranks(3, labels=False).to_list() == [1, 2, 0]
 
 
 def test_bin_ranks_over_is_per_group() -> None:

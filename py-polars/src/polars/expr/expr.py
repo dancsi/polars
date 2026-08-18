@@ -4946,6 +4946,10 @@ class Expr:
         NaN sorts above every other float, so it lands in the last bin rather than
         becoming null.
 
+        For :class:`Enum` inputs the bins follow the declaration order of the
+        categories; for :class:`Categorical` they follow lexical order. Either way
+        the bins agree with how :meth:`sort` orders the same values.
+
         See Also
         --------
         bin_quantiles
@@ -5060,6 +5064,10 @@ class Expr:
         probabilities: `(i + 1) / n` is generally not representable as a float, so the
         integer form is computed exactly instead.
 
+        For :class:`Enum` inputs the bins follow the declaration order of the
+        categories; for :class:`Categorical` they follow lexical order. Either way
+        the bins agree with how :meth:`sort` orders the same values.
+
         See Also
         --------
         bin_intervals
@@ -5167,6 +5175,10 @@ class Expr:
         Because ties are broken by input order, this expression observes the order of
         its input, and within :meth:`group_by` or :meth:`over` the bins are computed
         per group.
+
+        For :class:`Enum` inputs the bins follow the declaration order of the
+        categories; for :class:`Categorical` they follow lexical order. Either way
+        the bins agree with how :meth:`sort` orders the same values.
 
         See Also
         --------

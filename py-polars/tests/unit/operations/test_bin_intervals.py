@@ -193,6 +193,12 @@ def test_bin_intervals_all_null(include_intervals: bool) -> None:
         ),
         ([datetime.time(1, 0), datetime.time(5, 0)], pl.Time, [datetime.time(3, 0)]),
         ([Decimal("1.5"), Decimal("2.5")], pl.Decimal(10, 2), [Decimal("2.0")]),
+        (
+            ["mango", "zebra", "apple"],
+            pl.Enum(["zebra", "apple", "mango"]),
+            ["apple"],
+        ),
+        (["mango", "zebra", "apple"], pl.Categorical, ["mango"]),
     ],
 )
 def test_bin_intervals_boundaries_keep_input_dtype(
@@ -216,13 +222,51 @@ def test_bin_intervals_series_breakpoints() -> None:
     assert_series_equal(from_series, from_list)
 
 
-def test_bin_intervals_categorical_raises() -> None:
-    s = pl.Series("a", ["a", "b"], dtype=pl.Categorical)
+def test_bin_intervals_enum_uses_declaration_order() -> None:
+    # Declaration order deliberately disagrees with lexical order.
+    dtype = pl.Enum(["zebra", "apple", "mango"])
+    s = pl.Series("a", ["mango", "zebra", "apple"], dtype=dtype)
 
-    # Deferred: `search_sorted` compares categoricals lexically, which is wrong for
-    # Enum (declaration order) and meaningless for Categorical (insertion order).
-    with pytest.raises(InvalidOperationError, match="not supported"):
-        s.bin_intervals(["a"], labels=False)
+    result = s.bin_intervals(pl.Series(["apple"], dtype=dtype), labels=False)
+
+    # zebra < apple < mango, so only zebra falls below the breakpoint.
+    assert result.to_list() == [1, 0, 1]
+
+
+def test_bin_intervals_enum_boundaries_keep_dtype() -> None:
+    dtype = pl.Enum(["zebra", "apple", "mango"])
+    s = pl.Series("a", ["mango", "zebra"], dtype=dtype)
+
+    result = s.bin_intervals(
+        pl.Series(["apple"], dtype=dtype), labels=False, include_intervals=True
+    )
+
+    assert result.struct["left"].dtype == dtype
+    assert result.struct["right"].dtype == dtype
+
+
+def test_bin_intervals_enum_string_breakpoint_is_cast() -> None:
+    dtype = pl.Enum(["zebra", "apple", "mango"])
+    s = pl.Series("a", ["mango", "zebra"], dtype=dtype)
+
+    assert s.bin_intervals(["apple"], labels=False).to_list() == [1, 0]
+
+
+def test_bin_intervals_enum_unknown_breakpoint_raises() -> None:
+    dtype = pl.Enum(["zebra", "apple", "mango"])
+    s = pl.Series("a", ["mango", "zebra"], dtype=dtype)
+
+    with pytest.raises(InvalidOperationError, match="not exactly representable"):
+        s.bin_intervals(["nope"], labels=False)
+
+
+def test_bin_intervals_categorical_uses_lexical_order() -> None:
+    s = pl.Series("a", ["mango", "zebra", "apple"], dtype=pl.Categorical)
+
+    result = s.bin_intervals(pl.Series(["mango"], dtype=pl.Categorical), labels=False)
+
+    # Categorical sorts lexically: apple < mango < zebra.
+    assert result.to_list() == [1, 1, 0]
 
 
 def test_bin_intervals_over_is_a_noop() -> None:

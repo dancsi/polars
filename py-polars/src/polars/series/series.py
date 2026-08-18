@@ -2878,6 +2878,10 @@ class Series:
         Membership is decided by *position* rather than by value, so bins always have
         the requested sizes and equal values may be split across adjacent bins.
 
+        For :class:`Enum` inputs the bins follow the declaration order of the
+        categories; for :class:`Categorical` they follow lexical order. Either way
+        the bins agree with how :meth:`sort` orders the same values.
+
         See Also
         --------
         bin_intervals

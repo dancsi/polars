@@ -3,21 +3,6 @@ use polars_core::prelude::*;
 
 use crate::series::{SearchSortedSide, search_sorted};
 
-/// Categorical and Enum inputs are rejected for now.
-///
-/// `search_sorted` compares them by casting both sides to `String`, which is wrong for
-/// `Enum` (whose order is the declaration order) and meaningless for a global
-/// `Categorical` (insertion order). Rank binning would in fact order `Enum` correctly via
-/// `arg_sort`, but accepting it there while rejecting it elsewhere would be a confusing
-/// split, so the restriction is applied uniformly until all three forms can support it.
-fn ensure_binnable(dtype: &DataType) -> PolarsResult<()> {
-    polars_ensure!(
-        !dtype.is_categorical() && !dtype.is_enum(),
-        InvalidOperation: "binning is not supported for dtype `{}`", dtype
-    );
-    Ok(())
-}
-
 fn ascending() -> SortOptions {
     SortOptions {
         descending: false,
@@ -38,8 +23,13 @@ fn ascending() -> SortOptions {
 ///
 /// NaN sorts above every other float under `TotalOrd`, which `search_sorted` uses, so it
 /// lands in the last bin rather than becoming null. This differs from `cut`.
+///
+/// `Enum` is compared by physical code, which is its declaration order, while
+/// `Categorical` is compared lexically -- `search_sorted` casts it to `String`. Both agree
+/// with how `sort`, `arg_sort` and the comparison operators order those types, so bins are
+/// consistent with sorting either way. The `Categorical` path does materialise strings, so
+/// it is the one dtype here that carries an avoidable allocation.
 pub fn bins_from_breaks(s: &Series, breaks: &Series, right_closed: bool) -> PolarsResult<IdxCa> {
-    ensure_binnable(s.dtype())?;
     debug_assert_eq!(s.dtype(), breaks.dtype());
 
     let side = if right_closed {
@@ -394,10 +384,6 @@ fn bin_at_positions(
     include_intervals: bool,
     right_closed: Option<bool>,
 ) -> PolarsResult<Series> {
-    // Rank binning compares ranks rather than values, so it never reaches the check in
-    // `bins_from_breaks`.
-    ensure_binnable(s.dtype())?;
-
     if s.len() == s.null_count() {
         return empty_bins(s, n_bins, s.dtype(), labels, include_intervals);
     }

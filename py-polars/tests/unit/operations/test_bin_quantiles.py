@@ -107,6 +107,27 @@ def test_bin_quantiles_boundaries_keep_input_dtype() -> None:
     assert result.struct["right"].dtype == pl.Int16
 
 
+def test_bin_quantiles_enum_uses_declaration_order() -> None:
+    dtype = pl.Enum(["zebra", "apple", "mango"])
+    s = pl.Series("a", ["mango", "zebra", "apple"], dtype=dtype)
+
+    result = s.bin_quantiles([0.5], labels=False, include_intervals=True)
+
+    # Sorted by declaration order the values are zebra, apple, mango, so the median
+    # breakpoint is apple.
+    assert result.struct["bin"].to_list() == [1, 0, 1]
+    assert result.struct["left"].dtype == dtype
+
+
+def test_bin_quantiles_categorical_uses_lexical_order() -> None:
+    s = pl.Series("a", ["mango", "zebra", "apple"], dtype=pl.Categorical)
+
+    result = s.bin_quantiles([0.5], labels=False)
+
+    # Sorted lexically the values are apple, mango, zebra, so the breakpoint is mango.
+    assert result.to_list() == [1, 1, 0]
+
+
 def test_bin_quantiles_on_non_numeric() -> None:
     s = pl.Series("a", ["a", "b", "c", "d", "e"])
 
