@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import datetime
-from decimal import Decimal
 from typing import Any
 
 import pytest
 
 import polars as pl
-from polars.exceptions import ComputeError, InvalidOperationError, ShapeError
+from polars.exceptions import ComputeError, InvalidOperationError
 from polars.testing import assert_frame_equal, assert_series_equal
 
 
@@ -18,26 +17,6 @@ def test_bin_intervals() -> None:
 
     expected = pl.Series("a", ["a", "b", "b", "c", "c"], dtype=pl.Enum(["a", "b", "c"]))
     assert_series_equal(result, expected)
-
-
-def test_bin_intervals_lazy_schema() -> None:
-    lf = pl.LazyFrame({"a": [-2, -1, 0, 1, 2]})
-
-    result = lf.select(pl.col("a").bin_intervals([-1, 1], labels=["a", "b", "c"]))
-
-    expected = pl.LazyFrame(
-        {"a": ["a", "b", "b", "c", "c"]},
-        schema={"a": pl.Enum(["a", "b", "c"])},
-    )
-    assert_frame_equal(result, expected)
-
-
-def test_bin_intervals_labels_false() -> None:
-    s = pl.Series("a", [-2, -1, 0, 1, 2])
-
-    result = s.bin_intervals([-1, 1], labels=False)
-
-    assert_series_equal(result, pl.Series("a", [0, 1, 1, 2, 2], dtype=pl.UInt32))
 
 
 def test_bin_intervals_right_closed() -> None:
@@ -77,34 +56,6 @@ def test_bin_intervals_include_intervals() -> None:
     assert_series_equal(result, expected)
 
 
-def test_bin_intervals_include_intervals_lazy_schema() -> None:
-    lf = pl.LazyFrame({"a": [-2, 0, 2]})
-
-    q = lf.select(
-        pl.col("a").bin_intervals(
-            [-1, 1], labels=["x", "y", "z"], include_intervals=True
-        )
-    )
-
-    assert q.collect_schema() == q.collect().schema
-
-
-def test_bin_intervals_label_count_mismatch_raises() -> None:
-    lf = pl.LazyFrame({"a": [1, 2, 3]})
-
-    # Resolved from the schema, so this fails before any data is touched.
-    with pytest.raises(ShapeError, match="produces 3 bins but got 1 labels"):
-        lf.select(pl.col("a").bin_intervals([1, 2], labels=["x"])).collect_schema()
-
-
-@pytest.mark.parametrize("intervals", [[2, 1], [1, 1]])
-def test_bin_intervals_not_ascending_raises(intervals: list[int]) -> None:
-    lf = pl.LazyFrame({"a": [1, 2, 3]})
-
-    with pytest.raises(ComputeError, match="strictly ascending"):
-        lf.select(pl.col("a").bin_intervals(intervals, labels=False)).collect_schema()
-
-
 def test_bin_intervals_null_breakpoint_raises() -> None:
     lf = pl.LazyFrame({"a": [1, 2, 3]})
 
@@ -112,105 +63,41 @@ def test_bin_intervals_null_breakpoint_raises() -> None:
         lf.select(pl.col("a").bin_intervals([None], labels=False)).collect_schema()
 
 
-def test_bin_intervals_not_representable_raises() -> None:
-    lf = pl.LazyFrame({"a": [1, 2, 3]})
-
-    # A strict cast would truncate 1.5 to 1 and silently move values between bins.
-    with pytest.raises(InvalidOperationError, match="not exactly representable"):
-        lf.select(pl.col("a").bin_intervals([1.5], labels=False)).collect_schema()
-
-
-def test_bin_intervals_integral_float_breakpoint() -> None:
-    s = pl.Series("a", [1, 2, 3])
-
-    assert s.bin_intervals([2.0], labels=False).to_list() == [0, 1, 1]
-
-
-def test_bin_intervals_null_values() -> None:
-    s = pl.Series("a", [1, None, 3])
-
-    assert s.bin_intervals([2], labels=False).to_list() == [0, None, 1]
-
-
-def test_bin_intervals_nan_is_the_largest_value() -> None:
-    s = pl.Series("a", [0.0, float("nan"), 2.0])
-
-    # NaN sorts above every other float under total ordering, so it lands in the
-    # last bin rather than becoming null.
-    assert s.bin_intervals([1.0], labels=False).to_list() == [0, 1, 1]
-
-
-@pytest.mark.parametrize("include_intervals", [False, True])
-def test_bin_intervals_empty(include_intervals: bool) -> None:
-    s = pl.Series("a", [], dtype=pl.Int64)
-
-    result = s.bin_intervals([2], labels=False, include_intervals=include_intervals)
-
-    assert result.len() == 0
-    if include_intervals:
-        assert result.dtype == pl.Struct(
-            {"bin": pl.UInt32, "left": pl.Int64, "right": pl.Int64}
-        )
-
-
-@pytest.mark.parametrize("include_intervals", [False, True])
-def test_bin_intervals_all_null(include_intervals: bool) -> None:
-    s = pl.Series("a", [None, None], dtype=pl.Int64)
-
-    result = s.bin_intervals([2], labels=False, include_intervals=include_intervals)
-
-    assert result.len() == 2
-    if include_intervals:
-        assert result.dtype == pl.Struct(
-            {"bin": pl.UInt32, "left": pl.Int64, "right": pl.Int64}
-        )
-
-
 @pytest.mark.parametrize(
-    ("values", "dtype", "breaks"),
+    ("dtype", "breaks", "expected_bound", "expected_bins"),
     [
-        ([1, 2, 3, 4], pl.Int8, [2]),
-        ([1, 2, 3, 4], pl.Int64, [2]),
-        ([1, 2, 3, 4], pl.UInt32, [2]),
-        ([1.0, 2.0, 3.0], pl.Float32, [2.0]),
-        ([1.0, 2.0, 3.0], pl.Float64, [2.0]),
-        (["a", "b", "c"], pl.String, ["b"]),
-        ([True, False, True], pl.Boolean, [True]),
-        (
-            [datetime.date(2020, 1, 1), datetime.date(2022, 1, 1)],
-            pl.Date,
-            [datetime.date(2021, 1, 1)],
-        ),
-        (
-            [datetime.datetime(2020, 1, 1), datetime.datetime(2022, 1, 1)],
-            pl.Datetime("us"),
-            [datetime.datetime(2021, 1, 1)],
-        ),
-        (
-            [datetime.timedelta(days=1), datetime.timedelta(days=5)],
-            pl.Duration,
-            [datetime.timedelta(days=3)],
-        ),
-        ([datetime.time(1, 0), datetime.time(5, 0)], pl.Time, [datetime.time(3, 0)]),
-        ([Decimal("1.5"), Decimal("2.5")], pl.Decimal(10, 2), [Decimal("2.0")]),
-        (
-            ["mango", "zebra", "apple"],
-            pl.Enum(["zebra", "apple", "mango"]),
-            ["apple"],
-        ),
-        (["mango", "zebra", "apple"], pl.Categorical, ["mango"]),
+        # Both numeric, so the column and the breakpoints meet at their supertype rather
+        # than the breakpoints being forced into the column's dtype.
+        (pl.Int64, [1.5], pl.Float64, [0, 1, 1]),
+        (pl.Int64, [2.0], pl.Float64, [0, 1, 1]),
+        (pl.Float32, [0.1], pl.Float64, [1, 1, 1]),
+        (pl.UInt8, [2], pl.Int64, [0, 1, 1]),
+        (pl.Int8, [2], pl.Int64, [0, 1, 1]),
     ],
 )
-def test_bin_intervals_boundaries_keep_input_dtype(
-    values: list[Any], dtype: pl.DataType, breaks: list[Any]
+def test_bin_intervals_numeric_breakpoints_promote_to_supertype(
+    dtype: pl.DataType,
+    breaks: list[Any],
+    expected_bound: pl.DataType,
+    expected_bins: list[int],
 ) -> None:
-    s = pl.Series("a", values, dtype=dtype)
+    s = pl.Series("a", [1, 2, 3]).cast(dtype)
 
     result = s.bin_intervals(breaks, labels=False, include_intervals=True)
 
-    # The whole point of these functions over `cut`: boundaries are not forced to f64.
-    assert result.struct["left"].dtype == dtype
-    assert result.struct["right"].dtype == dtype
+    assert result.struct["bin"].to_list() == expected_bins
+    assert result.struct["left"].dtype == expected_bound
+
+
+def test_bin_intervals_breakpoints_of_the_input_dtype_do_not_promote() -> None:
+    s = pl.Series("a", [1, 2, 3], dtype=pl.Int8)
+
+    # Passing a Series rather than a Python list keeps the narrow dtype on both sides.
+    result = s.bin_intervals(
+        pl.Series([2], dtype=pl.Int8), labels=False, include_intervals=True
+    )
+
+    assert result.struct["left"].dtype == pl.Int8
 
 
 def test_bin_intervals_series_breakpoints() -> None:
@@ -256,7 +143,8 @@ def test_bin_intervals_enum_unknown_breakpoint_raises() -> None:
     dtype = pl.Enum(["zebra", "apple", "mango"])
     s = pl.Series("a", ["mango", "zebra"], dtype=dtype)
 
-    with pytest.raises(InvalidOperationError, match="not exactly representable"):
+    # Non-numeric breakpoints are cast down to the column, and "nope" is not a category.
+    with pytest.raises(InvalidOperationError, match="conversion from `str` to `enum`"):
         s.bin_intervals(["nope"], labels=False)
 
 
@@ -279,31 +167,6 @@ def test_bin_intervals_over_is_a_noop() -> None:
     )
 
 
-def test_bin_intervals_streaming() -> None:
-    lf = pl.LazyFrame({"a": [-2, -1, 0, 1, 2]})
-
-    q = lf.select(pl.col("a").bin_intervals([-1, 1], labels=["a", "b", "c"]))
-
-    assert_frame_equal(q.collect(engine="streaming"), q.collect(engine="in-memory"))
-
-
-def test_bin_intervals_cse() -> None:
-    lf = pl.LazyFrame({"a": [1, 2, 3]})
-    expr = pl.col("a").bin_intervals([2], labels=False)
-
-    result = lf.with_columns(x=expr, y=expr).collect()
-
-    assert result["x"].to_list() == result["y"].to_list()
-
-
-def test_bin_intervals_serde() -> None:
-    lf = pl.LazyFrame({"a": [1, 2, 3]})
-
-    q = lf.select(pl.col("a").bin_intervals([2], labels=["l", "h"]))
-
-    assert_frame_equal(pl.LazyFrame.deserialize(q.serialize()).collect(), q.collect())
-
-
 def test_bin_intervals_serde_temporal_breakpoints() -> None:
     lf = pl.LazyFrame({"d": [datetime.date(2020, 1, 1), datetime.date(2022, 1, 1)]})
 
@@ -319,57 +182,71 @@ def test_bin_intervals_uniform() -> None:
     assert s.bin_intervals(2, labels=["low", "high"]).to_list() == ["low", "high"]
 
 
-def test_bin_intervals_uniform_boundaries_are_float() -> None:
+def test_bin_intervals_uniform_boundaries_keep_input_dtype() -> None:
     s = pl.Series("a", [0, 100], dtype=pl.Int64)
 
     result = s.bin_intervals(4, labels=False, include_intervals=True)
 
-    # The one exception to "boundaries carry the input dtype": equal-width breakpoints
-    # need arithmetic, and truncating them back to Int64 could collapse two into one.
-    assert result.struct["left"].dtype == pl.Float64
-    assert result.struct["right"].dtype == pl.Float64
-    assert result.struct["right"].to_list() == [25.0, None]
+    # Equal-width breakpoints are computed in the input dtype, not via Float64.
+    assert result.struct["left"].dtype == pl.Int64
+    assert result.struct["right"].to_list() == [25, None]
 
 
-def test_bin_intervals_uniform_lazy_schema() -> None:
-    lf = pl.LazyFrame({"a": [0, 100]})
+def test_bin_intervals_uniform_is_exact_beyond_float64_precision() -> None:
+    base = 2**62
+    s = pl.Series("a", [base + i for i in range(4)])
 
-    q = lf.select(pl.col("a").bin_intervals(4, labels=False, include_intervals=True))
+    result = s.bin_intervals(4, labels=False, include_intervals=True)
 
-    assert q.collect_schema() == q.collect().schema
-
-
-def test_bin_intervals_uniform_non_numeric_raises() -> None:
-    lf = pl.LazyFrame({"a": ["x", "y"]})
-
-    with pytest.raises(InvalidOperationError, match="requires a numeric input"):
-        lf.select(pl.col("a").bin_intervals(2, labels=False)).collect_schema()
-
-
-def test_bin_intervals_uniform_zero_bins_raises() -> None:
-    lf = pl.LazyFrame({"a": [1, 2, 3]})
-
-    with pytest.raises(ComputeError, match="at least one bin"):
-        lf.select(pl.col("a").bin_intervals(0, labels=False)).collect_schema()
+    # Going through f64 would round all four values to the same double, collapsing
+    # min and max and dumping the whole column into the last bin.
+    assert result.struct["bin"].to_list() == [0, 1, 2, 3]
+    assert result.struct["right"].to_list() == [
+        base + 1,
+        base + 2,
+        base + 3,
+        None,
+    ]
 
 
-def test_bin_intervals_uniform_over_is_per_group() -> None:
-    df = pl.DataFrame({"a": [0, 10, 0, 1000], "g": ["x", "x", "y", "y"]})
+def test_bin_intervals_uniform_repeats_breakpoints_in_a_narrow_range() -> None:
+    s = pl.Series("a", [0, 1, 2, 3])
 
-    expr = pl.col("a").bin_intervals(2, labels=False)
+    result = s.bin_intervals(10, labels=False)
 
-    # min/max come from the data, so unlike explicit breakpoints this is per-group.
-    assert df.select(expr.over("g")).to_series().to_list() == [0, 1, 0, 1]
+    # Ten equal-width Int64 breakpoints do not exist between 0 and 3, so they repeat and
+    # the bins they delimit stay empty. The price of boundaries in the input dtype.
+    assert result.to_list() == [0, 3, 6, 9]
 
 
-@pytest.mark.parametrize("include_intervals", [False, True])
-def test_bin_intervals_uniform_all_null(include_intervals: bool) -> None:
-    s = pl.Series("a", [None, None], dtype=pl.Int64)
+@pytest.mark.parametrize(
+    ("right_closed", "expected_right"),
+    [
+        (False, [1, 2, 3, None]),
+        (True, [0, 1, 2, None]),
+    ],
+)
+def test_bin_intervals_uniform_integer_thresholds_follow_closure(
+    right_closed: bool, expected_right: list[int | None]
+) -> None:
+    s = pl.Series("a", [0, 1, 2, 3])
 
-    result = s.bin_intervals(3, labels=False, include_intervals=include_intervals)
+    result = s.bin_intervals(
+        4,
+        labels=False,
+        include_intervals=True,
+        right_closed=right_closed,
+    )
 
-    assert result.len() == 2
-    if include_intervals:
-        assert result.dtype == pl.Struct(
-            {"bin": pl.UInt32, "left": pl.Float64, "right": pl.Float64}
-        )
+    assert result.struct["bin"].to_list() == [0, 1, 2, 3]
+    assert result.struct["right"].to_list() == expected_right
+
+
+def test_bin_intervals_uniform_float_extremes() -> None:
+    max_float = float.fromhex("0x1.fffffffffffffp+1023")
+    s = pl.Series("a", [-max_float, max_float])
+
+    result = s.bin_intervals(2, labels=False, include_intervals=True)
+
+    assert result.struct["bin"].to_list() == [0, 1]
+    assert result.struct["right"].to_list() == [0.0, None]

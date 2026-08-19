@@ -1,5 +1,5 @@
 use arrow::legacy::error::PolarsResult;
-use polars_core::utils::try_get_supertype;
+use polars_core::utils::{SuperTypeFlags, try_get_supertype, try_get_supertype_with_options};
 use polars_utils::arena::Node;
 use polars_utils::format_pl_smallstr;
 use polars_utils::option::OptionTry;
@@ -976,11 +976,30 @@ pub(super) fn convert_functions(
         #[cfg(feature = "cutqcut")]
         F::Bin(mut options) => {
             // All argument validation happens here rather than in the kernel, so that
-            // errors surface at `collect_schema()`. Casting the breakpoints here also
-            // establishes the invariant that `Intervals` holds the input dtype, which
-            // is what lets `schema.rs` report the boundary dtype without seeing data.
+            // errors surface at `collect_schema()`. Reconciling the breakpoints here also
+            // establishes the invariant that `Intervals` holds the dtype both sides are
+            // compared in, which is what lets `schema.rs` report the boundary dtype
+            // without seeing data.
             let input_dtype = e[0].dtype(ctx.schema, ctx.arena)?.clone();
             let name = options.method.name();
+
+            if options.method.requires_numeric_input() {
+                polars_ensure!(
+                    input_dtype.is_numeric(),
+                    InvalidOperation: "`{}` requires a numeric input, got `{}`", name, input_dtype
+                );
+            } else {
+                polars_ensure!(
+                    input_dtype.is_ord(),
+                    InvalidOperation: "`{}` requires an orderable input, got `{}`", name, input_dtype
+                );
+            }
+            // `n_bins()` is `len + 1` for the three explicit forms, so this only bites
+            // the forms that take a bin count.
+            polars_ensure!(
+                options.method.n_bins() >= 1,
+                ComputeError: "`{}` requires at least one bin", name
+            );
 
             options.method = match options.method {
                 BinMethod::Intervals {
@@ -995,45 +1014,27 @@ pub(super) fn convert_functions(
                         breaks.null_count() == 0,
                         ComputeError: "`{}` breakpoints cannot contain nulls", name
                     );
-                    let given_dtype = breaks.dtype().clone();
-                    let cast = breaks
-                        .cast_with_options(&input_dtype, CastOptions::Strict)
-                        .map_err(|_| not_representable(name, &given_dtype, &input_dtype))?;
-                    // A strict cast rejects overflow but still truncates, so 1.5 would
-                    // silently become 1 and move values between bins. Round-trip to
-                    // catch any change in value.
-                    let round_trip = cast
-                        .cast_with_options(&given_dtype, CastOptions::Strict)
-                        .map_err(|_| not_representable(name, &given_dtype, &input_dtype))?;
-                    polars_ensure!(
-                        round_trip.equals_missing(&breaks),
-                        InvalidOperation:
-                        "`{}` breakpoints of dtype `{}` are not exactly representable in \
-                         the input dtype `{}`",
-                        name, given_dtype, input_dtype
-                    );
-                    let breaks = cast;
+                    let breaks = if input_dtype.is_numeric() && breaks.dtype().is_numeric() {
+                        // Widen both sides, so that an f32 column takes ordinary f64
+                        // breakpoints and an integer column takes fractional ones. Same
+                        // flags `search_sorted` itself declares, so a numeric column can
+                        // never be dragged over to `String`.
+                        let opts =
+                            (SuperTypeFlags::default() & !SuperTypeFlags::ALLOW_PRIMITIVE_TO_STRING)
+                                .into();
+                        let supertype =
+                            try_get_supertype_with_options(&input_dtype, breaks.dtype(), opts)?;
+                        breaks.cast(&supertype)?
+                    } else {
+                        // Otherwise cast the breakpoints down to the column. Taking a
+                        // supertype here would silently reinterpret an `Enum` column as
+                        // `String` and swap declaration order for lexical order.
+                        breaks.strict_cast(&input_dtype)?
+                    };
+                    // After the cast: widening cannot collapse breakpoints, but a
+                    // `Decimal` to `Float64` promotion can.
                     ensure_strictly_ascending(&breaks, name, "intervals")?;
                     BinMethod::intervals(breaks, right_closed)
-                },
-                BinMethod::UniformIntervals {
-                    n_bins,
-                    right_closed,
-                } => {
-                    polars_ensure!(
-                        n_bins >= 1,
-                        ComputeError: "`{}` requires at least one bin", name
-                    );
-                    polars_ensure!(
-                        input_dtype.is_primitive_numeric(),
-                        InvalidOperation:
-                        "`{}` with a number of bins requires a numeric input, got `{}`",
-                        name, input_dtype
-                    );
-                    BinMethod::UniformIntervals {
-                        n_bins,
-                        right_closed,
-                    }
                 },
                 BinMethod::Quantiles {
                     probs,
@@ -1049,13 +1050,7 @@ pub(super) fn convert_functions(
                     ensure_ascending_unit_interval(&fractions, name, "ranks")?;
                     BinMethod::Ranks { fractions }
                 },
-                m @ (BinMethod::UniformQuantiles { .. } | BinMethod::UniformRanks { .. }) => {
-                    polars_ensure!(
-                        m.n_bins() >= 1,
-                        ComputeError: "`{}` requires at least one bin", name
-                    );
-                    m
-                },
+                m => m,
             };
 
             I::Bin(options)
@@ -1293,14 +1288,4 @@ fn ensure_ascending_unit_interval(xs: &[f64], name: &str, arg: &str) -> PolarsRe
         ComputeError: "`{}` requires `{}` to be strictly ascending", name, arg
     );
     Ok(())
-}
-
-#[cfg(feature = "cutqcut")]
-fn not_representable(name: &str, given: &DataType, input: &DataType) -> PolarsError {
-    polars_err!(
-        InvalidOperation:
-        "`{}` breakpoints of dtype `{}` are not exactly representable in the input \
-         dtype `{}`",
-        name, given, input
-    )
 }

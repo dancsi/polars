@@ -349,11 +349,9 @@ impl IRFunctionExpr {
             },
             #[cfg(feature = "cutqcut")]
             Bin(options) => {
+                // The bin count and the input dtype were already validated during
+                // DSL to IR conversion.
                 let n_bins = options.method.n_bins();
-                polars_ensure!(
-                    n_bins >= 1,
-                    ComputeError: "`{}` requires at least one bin", options.method.name()
-                );
                 let bin_dtype = match &options.labels {
                     None => DataType::UInt32,
                     Some(labels) => {
@@ -370,14 +368,7 @@ impl IRFunctionExpr {
                 if !options.include_intervals {
                     return mapper.with_dtype(bin_dtype);
                 }
-                // Equal-width breakpoints need arithmetic, so that form reports its
-                // boundaries in f64. Every other form either carries pre-cast
-                // breakpoints or gathers actual values out of the column.
-                let bound = if options.method.has_float_bounds() {
-                    DataType::Float64
-                } else {
-                    mapper.args()[0].dtype().clone()
-                };
+                let bound = options.method.bound_dtype(mapper.args()[0].dtype());
                 mapper.with_dtype(DataType::Struct(vec![
                     Field::new(PlSmallStr::from_static("bin"), bin_dtype),
                     Field::new(PlSmallStr::from_static("left"), bound.clone()),

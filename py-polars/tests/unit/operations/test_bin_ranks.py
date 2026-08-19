@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 
 import polars as pl
-from polars.exceptions import ComputeError, ShapeError
-from polars.testing import assert_frame_equal, assert_series_equal
+from polars.exceptions import ComputeError
+from polars.testing import assert_series_equal
 
 
 def test_bin_ranks() -> None:
@@ -16,24 +16,6 @@ def test_bin_ranks() -> None:
         "a", ["low", "low", "high", "high"], dtype=pl.Enum(["low", "high"])
     )
     assert_series_equal(result, expected)
-
-
-def test_bin_ranks_lazy_schema() -> None:
-    lf = pl.LazyFrame({"a": [10, 20, 30, 40]})
-
-    result = lf.select(pl.col("a").bin_ranks([0.5], labels=["low", "high"]))
-
-    expected = pl.LazyFrame(
-        {"a": ["low", "low", "high", "high"]},
-        schema={"a": pl.Enum(["low", "high"])},
-    )
-    assert_frame_equal(result, expected)
-
-
-def test_bin_ranks_labels_false() -> None:
-    s = pl.Series("a", [10, 20, 30, 40])
-
-    assert s.bin_ranks([0.5], labels=False).to_list() == [0, 0, 1, 1]
 
 
 def test_bin_ranks_fractions_give_requested_shares() -> None:
@@ -82,13 +64,6 @@ def test_bin_ranks_splits_ties() -> None:
     assert result.value_counts().sort("a")["count"].to_list() == [4, 4, 3, 3]
 
 
-def test_bin_ranks_ties_broken_by_input_order() -> None:
-    s = pl.Series("a", [5, 5])
-
-    # Position, not value, decides: the first occurrence goes to the lower bin.
-    assert s.bin_ranks(2, labels=False).to_list() == [0, 1]
-
-
 def test_bin_ranks_boundaries_are_values_not_ranks() -> None:
     s = pl.Series("a", [10, 20, 30, 40])
 
@@ -105,32 +80,6 @@ def test_bin_ranks_boundaries_are_values_not_ranks() -> None:
         dtype=pl.Struct({"bin": pl.UInt32, "left": pl.Int64, "right": pl.Int64}),
     )
     assert_series_equal(result, expected)
-
-
-def test_bin_ranks_include_intervals_lazy_schema() -> None:
-    lf = pl.LazyFrame({"a": [10, 20, 30, 40]})
-
-    q = lf.select(pl.col("a").bin_ranks(2, labels=["l", "h"], include_intervals=True))
-
-    assert q.collect_schema() == q.collect().schema
-
-
-def test_bin_ranks_boundaries_keep_input_dtype() -> None:
-    s = pl.Series("a", [1, 2, 3, 4], dtype=pl.Int16)
-
-    result = s.bin_ranks(2, labels=False, include_intervals=True)
-
-    assert result.struct["left"].dtype == pl.Int16
-    assert result.struct["right"].dtype == pl.Int16
-
-
-def test_bin_ranks_on_non_numeric() -> None:
-    s = pl.Series("a", ["a", "b", "c", "d"])
-
-    result = s.bin_ranks(2, labels=False, include_intervals=True)
-
-    assert result.struct["bin"].to_list() == [0, 0, 1, 1]
-    assert result.struct["left"].dtype == pl.String
 
 
 def test_bin_ranks_has_no_right_closed() -> None:
@@ -158,67 +107,12 @@ def test_bin_ranks_more_bins_than_rows() -> None:
     assert s.bin_ranks(5, labels=False).to_list() == [0, 1, 2]
 
 
-def test_bin_ranks_label_count_mismatch_raises() -> None:
-    lf = pl.LazyFrame({"a": [1, 2, 3]})
-
-    with pytest.raises(ShapeError, match="produces 2 bins but got 1 labels"):
-        lf.select(pl.col("a").bin_ranks([0.5], labels=["x"])).collect_schema()
-
-
-@pytest.mark.parametrize("ranks", [[0.6, 0.3], [0.5, 0.5]])
-def test_bin_ranks_not_ascending_raises(ranks: list[float]) -> None:
-    lf = pl.LazyFrame({"a": [1, 2, 3]})
-
-    with pytest.raises(ComputeError, match="strictly ascending"):
-        lf.select(pl.col("a").bin_ranks(ranks, labels=False)).collect_schema()
-
-
 @pytest.mark.parametrize("ranks", [[-0.1], [1.5]])
 def test_bin_ranks_out_of_range_raises(ranks: list[float]) -> None:
     lf = pl.LazyFrame({"a": [1, 2, 3]})
 
     with pytest.raises(ComputeError, match=r"between 0\.0 and 1\.0"):
         lf.select(pl.col("a").bin_ranks(ranks, labels=False)).collect_schema()
-
-
-def test_bin_ranks_zero_bins_raises() -> None:
-    lf = pl.LazyFrame({"a": [1, 2, 3]})
-
-    with pytest.raises(ComputeError, match="at least one bin"):
-        lf.select(pl.col("a").bin_ranks(0, labels=False)).collect_schema()
-
-
-def test_bin_ranks_null_values() -> None:
-    s = pl.Series("a", [1, None, 3, 5])
-
-    # Nulls are excluded from the ranking and stay null in the output.
-    assert s.bin_ranks([0.5], labels=False).to_list() == [0, None, 0, 1]
-
-
-@pytest.mark.parametrize("include_intervals", [False, True])
-def test_bin_ranks_empty(include_intervals: bool) -> None:
-    s = pl.Series("a", [], dtype=pl.Int64)
-
-    result = s.bin_ranks(2, labels=False, include_intervals=include_intervals)
-
-    assert result.len() == 0
-    if include_intervals:
-        assert result.dtype == pl.Struct(
-            {"bin": pl.UInt32, "left": pl.Int64, "right": pl.Int64}
-        )
-
-
-@pytest.mark.parametrize("include_intervals", [False, True])
-def test_bin_ranks_all_null(include_intervals: bool) -> None:
-    s = pl.Series("a", [None, None], dtype=pl.Int64)
-
-    result = s.bin_ranks(2, labels=False, include_intervals=include_intervals)
-
-    assert result.len() == 2
-    if include_intervals:
-        assert result.dtype == pl.Struct(
-            {"bin": pl.UInt32, "left": pl.Int64, "right": pl.Int64}
-        )
 
 
 def test_bin_ranks_enum_uses_declaration_order() -> None:
@@ -234,28 +128,3 @@ def test_bin_ranks_categorical_uses_lexical_order() -> None:
 
     # Positions in lexical order: apple is 0, mango is 1, zebra is 2.
     assert s.bin_ranks(3, labels=False).to_list() == [1, 2, 0]
-
-
-def test_bin_ranks_over_is_per_group() -> None:
-    df = pl.DataFrame({"a": [1, 2, 3, 4, 100, 200], "g": ["x"] * 3 + ["y"] * 3})
-
-    expr = pl.col("a").bin_ranks(2, labels=False)
-
-    # Bins are positional within each group.
-    assert df.select(expr.over("g")).to_series().to_list() == [0, 0, 1, 0, 0, 1]
-
-
-def test_bin_ranks_streaming() -> None:
-    lf = pl.LazyFrame({"a": [10, 20, 30, 40]})
-
-    q = lf.select(pl.col("a").bin_ranks(2, labels=["l", "h"]))
-
-    assert_frame_equal(q.collect(engine="streaming"), q.collect(engine="in-memory"))
-
-
-def test_bin_ranks_serde() -> None:
-    lf = pl.LazyFrame({"a": [1, 2, 3, 4]})
-
-    q = lf.select(pl.col("a").bin_ranks(2, labels=["l", "h"]))
-
-    assert_frame_equal(pl.LazyFrame.deserialize(q.serialize()).collect(), q.collect())

@@ -4916,9 +4916,13 @@ class Expr:
         intervals
             Either a strictly ascending sequence of breakpoints, or a positive integer
             `n` giving a number of equal-width bins spanning `[min, max]`. Explicit
-            breakpoints may be of any orderable data type and are cast to the data type
-            of this expression. Passing an integer requires a numeric input and produces
-            `Float64` interval boundaries.
+            breakpoints may be of any orderable data type; passing an integer requires a
+            numeric input (integer, float or :class:`Decimal`).
+
+            Explicit breakpoints are reconciled with the input: if both are numeric they
+            are widened to their common supertype, so an `Int64` input takes fractional
+            breakpoints and a `Float32` one takes ordinary Python floats. Otherwise the
+            breakpoints are cast to the data type of this expression.
         labels
             Names of the bins, or `False` to return the integer bin index. The number of
             labels must equal the number of bins, which is one more than the number of
@@ -4942,6 +4946,15 @@ class Expr:
         effect on the result. With an integer number of bins the breakpoints are derived
         from the data and are therefore computed *per group* within
         :meth:`group_by`/:meth:`over`.
+
+        The interval boundaries carry the data type they were compared in: the input
+        data type, or the supertype above if explicit breakpoints widened it.
+
+        Equal-width bins are computed without going through `Float64`, so assignments
+        stay exact for integer values beyond 2**53. If a mathematical breakpoint is not
+        representable, the reported boundary is rounded to the equivalent threshold for
+        the selected closure. Thresholds can therefore repeat -- leaving empty bins --
+        when the data type has fewer than `n` representable values in `[min, max]`.
 
         NaN sorts above every other float, so it lands in the last bin rather than
         becoming null.
@@ -5023,11 +5036,13 @@ class Expr:
         """
         Bin values into discrete intervals delimited by quantiles of the data.
 
-        .. engine-support:: in-memory
+        .. engine-support:: in-memory, streaming
 
         .. warning::
             This functionality is considered **unstable**. It may be changed
             at any point without it being considered a breaking change.
+
+        Requires a numeric input: integer, float or :class:`Decimal`.
 
         Parameters
         ----------
@@ -5063,10 +5078,6 @@ class Expr:
         type. Passing an integer is *not* equivalent to passing the corresponding
         probabilities: `(i + 1) / n` is generally not representable as a float, so the
         integer form is computed exactly instead.
-
-        For :class:`Enum` inputs the bins follow the declaration order of the
-        categories; for :class:`Categorical` they follow lexical order. Either way
-        the bins agree with how :meth:`sort` orders the same values.
 
         See Also
         --------
@@ -5133,7 +5144,7 @@ class Expr:
         """
         Bin values by their position in sorted order.
 
-        .. engine-support:: in-memory
+        .. engine-support:: in-memory, streaming
 
         .. warning::
             This functionality is considered **unstable**. It may be changed

@@ -18,13 +18,14 @@ pub struct BinOptions {
 #[cfg_attr(feature = "dsl-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, PartialEq, Debug)]
 pub enum BinMethod {
-    /// Explicit breakpoints, held as one `List` value. Cast to the input dtype during
-    /// DSL to IR conversion, so by the time this reaches the IR the inner dtype is the
-    /// input dtype.
+    /// Explicit breakpoints, held as one `List` value. Reconciled with the input during
+    /// DSL to IR conversion: numeric breakpoints and a numeric input are both widened to
+    /// their supertype, anything else is cast down to the input dtype. Either way the
+    /// inner dtype by the time this reaches the IR is the dtype both sides are compared
+    /// in, which is also the dtype of the reported boundaries.
     Intervals { breaks: Scalar, right_closed: bool },
     /// `n_bins` equal-width bins spanning `[min, max]`. The breakpoints are derived at
-    /// runtime and are always `Float64`, the one case where the interval boundaries do
-    /// not carry the input dtype.
+    /// runtime, in the input dtype.
     UniformIntervals { n_bins: usize, right_closed: bool },
     /// Quantile probabilities in `[0, 1]`, strictly ascending.
     Quantiles { probs: Vec<f64>, right_closed: bool },
@@ -86,10 +87,27 @@ impl BinMethod {
         }
     }
 
-    /// Whether the interval boundaries are reported in `Float64` rather than in the
-    /// input dtype.
-    pub fn has_float_bounds(&self) -> bool {
-        matches!(self, Self::UniformIntervals { .. })
+    /// Whether this form does arithmetic on the values, and so needs a numeric input.
+    ///
+    /// The quantile forms only gather values, but the spec restricts them to numerics
+    /// anyway. Interval and rank binning accept anything with an order.
+    pub fn requires_numeric_input(&self) -> bool {
+        matches!(
+            self,
+            Self::UniformIntervals { .. } | Self::Quantiles { .. } | Self::UniformQuantiles { .. }
+        )
+    }
+
+    /// The dtype of the `left`/`right` interval boundaries.
+    pub fn bound_dtype(&self, input: &DataType) -> DataType {
+        match self {
+            // Reconciled with the input during DSL to IR conversion.
+            Self::Intervals { .. } => self.breaks().unwrap().dtype().clone(),
+            // Every other form reports boundaries in the input dtype: equal-width
+            // breakpoints are computed in it, and the rest gather values out of the
+            // column.
+            _ => input.clone(),
+        }
     }
 }
 

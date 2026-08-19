@@ -2738,9 +2738,13 @@ class Series:
         intervals
             Either a strictly ascending sequence of breakpoints, or a positive integer
             `n` giving a number of equal-width bins spanning `[min, max]`. Explicit
-            breakpoints may be of any orderable data type and are cast to this Series'
-            data type. Passing an integer requires a numeric input and produces
-            `Float64` interval boundaries.
+            breakpoints may be of any orderable data type; passing an integer requires a
+            numeric input (integer, float or :class:`Decimal`).
+
+            Explicit breakpoints are reconciled with the input: if both are numeric they
+            are widened to their common supertype, so an `Int64` input takes fractional
+            breakpoints and a `Float32` one takes ordinary Python floats. Otherwise the
+            breakpoints are cast to this Series' data type.
         labels
             Names of the bins, or `False` to return the integer bin index. The number of
             labels must equal the number of bins, which is one more than the number of
@@ -2757,6 +2761,17 @@ class Series:
         Series
             Series of data type :class:`Enum`, or :class:`UInt32` if `labels`
             is `False`, or :class:`Struct` if `include_intervals` is set.
+
+        Notes
+        -----
+        The interval boundaries carry the data type they were compared in: this Series'
+        data type, or the supertype above if explicit breakpoints widened it.
+
+        Equal-width bins are computed without going through `Float64`, so assignments
+        stay exact for integer values beyond 2**53. If a mathematical breakpoint is not
+        representable, the reported boundary is rounded to the equivalent threshold for
+        the selected closure. Thresholds can therefore repeat -- leaving empty bins --
+        when the data type has fewer than `n` representable values in `[min, max]`.
 
         See Also
         --------
@@ -2792,6 +2807,8 @@ class Series:
         .. warning::
             This functionality is considered **unstable**. It may be changed
             at any point without it being considered a breaking change.
+
+        Requires a numeric input: integer, float or :class:`Decimal`.
 
         Parameters
         ----------

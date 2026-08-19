@@ -1,14 +1,23 @@
 use arrow::compute::concatenate::concatenate_validities;
 use polars_core::prelude::*;
+use polars_core::with_match_physical_integer_polars_type;
 
 use crate::series::{SearchSortedSide, search_sorted};
 
-fn ascending() -> SortOptions {
-    SortOptions {
-        descending: false,
-        nulls_last: true,
-        ..Default::default()
-    }
+/// How [`bin_intervals`] delimits its bins.
+pub enum IntervalSpec<'a> {
+    /// Explicit breakpoints, ascending and in the same dtype as the input.
+    Breaks(&'a Series),
+    /// `n` equal-width bins spanning `[min, max]`.
+    Count(usize),
+}
+
+/// How [`bin_quantiles`] and [`bin_ranks`] delimit their bins.
+pub enum FractionSpec<'a> {
+    /// Explicit ascending fractions in `[0, 1]`.
+    Explicit(&'a [f64]),
+    /// `n` bins of equal probability, or of equal size for [`bin_ranks`].
+    Count(usize),
 }
 
 /// Assign every element of `s` to a bin delimited by `breaks`.
@@ -30,7 +39,11 @@ fn ascending() -> SortOptions {
 /// consistent with sorting either way. The `Categorical` path does materialise strings, so
 /// it is the one dtype here that carries an avoidable allocation.
 pub fn bins_from_breaks(s: &Series, breaks: &Series, right_closed: bool) -> PolarsResult<IdxCa> {
-    debug_assert_eq!(s.dtype(), breaks.dtype());
+    polars_ensure!(
+        s.dtype() == breaks.dtype(),
+        ComputeError: "binning expects the breakpoints to be of the input dtype `{}`, got `{}`",
+        s.dtype(), breaks.dtype()
+    );
 
     let side = if right_closed {
         SearchSortedSide::Left
@@ -53,18 +66,29 @@ pub fn bins_from_breaks(s: &Series, breaks: &Series, right_closed: bool) -> Pola
     Ok(idx)
 }
 
+/// Sort options shared by every form that works from sorted order.
+///
+/// `maintain_order` matters: [`bin_ranks`] splits ties across adjacent bins by position,
+/// so without a stable sort `[5, 5]` over two bins could come back as `[1, 0]`. It is
+/// load-bearing for the String and Binary sort paths, which branch on it directly; the
+/// numeric paths happen to be stable either way.
+fn sort_options() -> SortOptions {
+    SortOptions {
+        descending: false,
+        nulls_last: true,
+        maintain_order: true,
+        ..Default::default()
+    }
+}
+
 /// The 0-based position of every element within the non-null values in sorted order,
 /// null wherever `s` is null.
 ///
 /// Adapted from `RankMethod::Ordinal` (`crate::series::ops::rank`), which is 1-based.
 /// Duplicated rather than reused so that `cutqcut` need not enable the `rank` feature,
 /// which would pull in `rand`.
-pub fn ordinal_ranks_0based(s: &Series) -> PolarsResult<IdxCa> {
-    let len = s.len();
-    let null_count = s.null_count();
-    let sort_idx = s.arg_sort(ascending()).slice(0, len - null_count);
-
-    let mut out = vec![0 as IdxSize; len];
+fn ranks_from_sort_idx(s: &Series, sort_idx: &IdxCa) -> IdxCa {
+    let mut out = vec![0 as IdxSize; s.len()];
     let mut rank: IdxSize = 0;
     for arr in sort_idx.downcast_iter() {
         for i in arr.values_iter() {
@@ -72,55 +96,151 @@ pub fn ordinal_ranks_0based(s: &Series) -> PolarsResult<IdxCa> {
             rank += 1;
         }
     }
-    Ok(IdxCa::from_vec_validity(
-        s.name().clone(),
-        out,
-        concatenate_validities(s.chunks()),
-    ))
+    IdxCa::from_vec_validity(s.name().clone(), out, concatenate_validities(s.chunks()))
 }
 
 /// Gather the value at each given position within the non-null values in sorted order.
 ///
 /// Positions at or past the non-null count yield null, which is what a trailing empty
-/// bin needs. Only `positions.len()` elements are materialised, so this costs one
-/// `arg_sort` plus a small gather rather than a fully sorted copy of the column.
-pub fn breaks_at_sorted_positions(s: &Series, positions: &[IdxSize]) -> PolarsResult<Series> {
-    let non_null_len = s.len() - s.null_count();
-    let sort_idx = s.arg_sort(ascending()).slice(0, non_null_len);
+/// bin needs. Only `positions.len()` elements are materialised, so this costs a small
+/// gather rather than a fully sorted copy of the column.
+fn gather_at_sorted_positions(
+    s: &Series,
+    sort_idx: &IdxCa,
+    positions: &[IdxSize],
+) -> PolarsResult<Series> {
+    let non_null_len = sort_idx.len() as IdxSize;
 
     let wanted: IdxCa = positions
         .iter()
-        .map(|p| (*p < non_null_len as IdxSize).then_some(*p))
+        .map(|p| (*p < non_null_len).then_some(*p))
         .collect_ca(PlSmallStr::EMPTY);
 
     let phys_idx = sort_idx.take(&wanted)?;
     s.take(&phys_idx)
 }
 
-/// Equal-width breakpoints `min + (i + 1)/n_bins * (max - min)` for `0 <= i < n_bins - 1`.
+/// Order-preserving map between an integer and `u128`.
 ///
-/// Always `Float64`: the arithmetic is generally non-integral, and truncating it back to
-/// an integer input dtype could even collapse two breakpoints into one.
-pub fn uniform_interval_breaks(s: &Series, n_bins: usize) -> PolarsResult<Series> {
-    let n_breaks = n_bins.saturating_sub(1);
-    let f = s.cast(&DataType::Float64)?;
-    let (Some(min), Some(max)) = (f.min::<f64>()?, f.max::<f64>()?) else {
-        return Ok(Series::full_null(
-            s.name().clone(),
-            n_breaks,
-            &DataType::Float64,
-        ));
+/// Equal-width breakpoints are computed in this domain so that one accumulator width
+/// covers every integer type without overflow, and so that `max - min` cannot overflow
+/// the input's own width (`i64::MIN` to `i64::MAX` does).
+trait OrderedBits: Copy {
+    fn to_ordered(self) -> u128;
+    fn from_ordered(bits: u128) -> Self;
+}
+
+macro_rules! impl_ordered_bits {
+    ($($signed:ty => $unsigned:ty),* $(,)?) => {
+        $(
+            impl OrderedBits for $signed {
+                fn to_ordered(self) -> u128 {
+                    // Flipping the sign bit maps the signed range onto the unsigned one
+                    // while preserving order.
+                    ((self as $unsigned) ^ (1 << (<$unsigned>::BITS - 1))) as u128
+                }
+                fn from_ordered(bits: u128) -> Self {
+                    ((bits as $unsigned) ^ (1 << (<$unsigned>::BITS - 1))) as $signed
+                }
+            }
+            impl OrderedBits for $unsigned {
+                fn to_ordered(self) -> u128 {
+                    self as u128
+                }
+                fn from_ordered(bits: u128) -> Self {
+                    bits as $unsigned
+                }
+            }
+        )*
     };
-    let width = max - min;
-    let breaks: Vec<f64> = (0..n_breaks)
-        .map(|i| min + ((i + 1) as f64 / n_bins as f64) * width)
-        .collect();
-    Ok(Float64Chunked::from_vec(s.name().clone(), breaks).into_series())
+}
+
+impl_ordered_bits!(i8 => u8, i16 => u16, i32 => u32, i64 => u64, i128 => u128);
+
+/// Representable thresholds for equal-width bins over `[min, max]`.
+///
+/// The exact breakpoints need not be representable in an integer dtype. For left-closed
+/// bins the equivalent threshold is their ceiling; for right-closed bins it is their
+/// floor. Quotient/remainder accumulation computes those thresholds without overflowing
+/// and without going through `f64`.
+fn uniform_integer_thresholds<N: OrderedBits>(
+    min: N,
+    max: N,
+    n_bins: usize,
+    right_closed: bool,
+) -> Vec<N> {
+    let n = n_bins as u128;
+    let min = min.to_ordered();
+    let span = max.to_ordered() - min;
+    let (step, remainder) = (span / n, span % n);
+    let mut offset = 0;
+    let mut error = 0;
+
+    (1..n_bins)
+        .map(|_| {
+            offset += step;
+            error += remainder;
+            if error >= n {
+                offset += 1;
+                error -= n;
+            }
+
+            let round_up = !right_closed && error != 0;
+            N::from_ordered(min + offset + u128::from(round_up))
+        })
+        .collect()
+}
+
+/// Equal-width breakpoints `min + (i + 1)/n_bins * (max - min)` for `0 <= i < n_bins - 1`,
+/// in the input dtype.
+///
+/// Floats go through `f64` and are narrowed back afterwards; integers and `Decimal` (via
+/// its `Int128` physical) use [`uniform_integer_thresholds`]. All null when there is no
+/// usable `min`/`max`.
+fn uniform_interval_breaks(s: &Series, n_bins: usize, right_closed: bool) -> PolarsResult<Series> {
+    let n_breaks = n_bins.saturating_sub(1);
+    let dtype = s.dtype();
+    let all_null = || Ok(Series::full_null(s.name().clone(), n_breaks, dtype));
+
+    if dtype.is_float() {
+        let f = s.cast(&DataType::Float64)?;
+        let (Some(min), Some(max)) = (f.min::<f64>()?, f.max::<f64>()?) else {
+            return all_null();
+        };
+        let breaks: Vec<f64> = (1..=n_breaks)
+            .map(|i| {
+                let t = i as f64 / n_bins as f64;
+                min * (1.0 - t) + max * t
+            })
+            .collect();
+        return Float64Chunked::from_vec(s.name().clone(), breaks)
+            .into_series()
+            .cast(dtype);
+    }
+
+    let phys = s.to_physical_repr();
+    let phys: &Series = phys.as_ref();
+    let breaks = with_match_physical_integer_polars_type!(phys.dtype(), |$T| {
+        let ca: &ChunkedArray<$T> = phys.as_ref().as_ref();
+        let (Some(min), Some(max)) = (ca.min(), ca.max()) else {
+            return all_null();
+        };
+        ChunkedArray::<$T>::from_vec(
+            s.name().clone(),
+            uniform_integer_thresholds(min, max, n_bins, right_closed),
+        )
+        .into_series()
+    });
+
+    // Reattach the logical dtype: a no-op for plain integers, and restores the precision
+    // and scale for `Decimal`, whose breakpoints were computed on its i128 mantissas.
+    // SAFETY: the values came out of the column's own physical range.
+    unsafe { breaks.from_physical_unchecked(dtype) }
 }
 
 /// Breakpoint positions for explicit quantile probabilities: `floor(q * (len - 1))`,
 /// matching `QuantileMethod::Lower`.
-pub fn quantile_break_positions(non_null_len: usize, probs: &[f64]) -> Vec<IdxSize> {
+fn quantile_break_positions(non_null_len: usize, probs: &[f64]) -> Vec<IdxSize> {
     if non_null_len == 0 {
         return vec![0; probs.len()];
     }
@@ -138,14 +258,14 @@ pub fn quantile_break_positions(non_null_len: usize, probs: &[f64]) -> Vec<IdxSi
 /// `f64`, so `floor(q * (len - 1))` can land one element low. For example `7/10` is
 /// `0.69999999999999996`, so with 91 values `0.7 * 90 == 62.999999999999996` floors to
 /// 62 where the exact answer is 63.
-pub fn quantile_break_positions_uniform(non_null_len: usize, n_bins: usize) -> Vec<IdxSize> {
+fn quantile_break_positions_uniform(non_null_len: usize, n_bins: usize) -> Vec<IdxSize> {
     let n_breaks = n_bins.saturating_sub(1);
     if non_null_len == 0 {
         return vec![0; n_breaks];
     }
     let span = non_null_len - 1;
-    (0..n_breaks)
-        .map(|i| (((i + 1) * span) / n_bins) as IdxSize)
+    (1..=n_breaks)
+        .map(|i| ((i * span) / n_bins) as IdxSize)
         .collect()
 }
 
@@ -153,17 +273,15 @@ pub fn quantile_break_positions_uniform(non_null_len: usize, n_bins: usize) -> V
 ///
 /// Bin `i` receives `k + 1` elements while `i < len % n_bins` and `k` afterwards, so the
 /// earlier bins are the larger ones: 14 elements over 4 bins gives 4 + 4 + 3 + 3.
-pub fn rank_cut_positions_uniform(non_null_len: usize, n_bins: usize) -> Vec<IdxSize> {
+fn rank_cut_positions_uniform(non_null_len: usize, n_bins: usize) -> Vec<IdxSize> {
     let k = non_null_len / n_bins;
     let r = non_null_len % n_bins;
-    (0..n_bins.saturating_sub(1))
-        .map(|i| ((i + 1) * k + (i + 1).min(r)) as IdxSize)
-        .collect()
+    (1..n_bins).map(|i| (i * k + i.min(r)) as IdxSize).collect()
 }
 
 /// Cut positions for explicit cumulative fractions: `round(f * len)`, rounding half away
 /// from zero so that, as in [`rank_cut_positions_uniform`], earlier bins are the larger.
-pub fn rank_cut_positions_fractions(non_null_len: usize, fractions: &[f64]) -> Vec<IdxSize> {
+fn rank_cut_positions_fractions(non_null_len: usize, fractions: &[f64]) -> Vec<IdxSize> {
     fractions
         .iter()
         .map(|f| (f * non_null_len as f64).round() as IdxSize)
@@ -173,27 +291,24 @@ pub fn rank_cut_positions_fractions(non_null_len: usize, fractions: &[f64]) -> V
 /// Turn a column of bin indices into the final output.
 ///
 /// Without labels the bins are returned as `UInt32`, with labels as an `Enum` over them.
-/// If `include_intervals` the result is instead a struct of `bin`, `left` and `right`,
-/// where `left` is null for the first bin and `right` null for the last.
-///
-/// `breaks` holds the `n_bins - 1` boundary values. For rank-based binning these are the
-/// gathered boundary *values*, not the rank positions.
-pub fn finish_bins(
+/// When `breaks` is given the result is instead a struct of `bin`, `left` and `right`,
+/// where `left` is null for the first bin and `right` null for the last. `breaks` holds
+/// the `n_bins - 1` boundary values; for rank-based binning these are the gathered
+/// boundary *values*, not the rank positions.
+fn finish_bins(
     out_name: PlSmallStr,
     bin_idx: &IdxCa,
-    breaks: &Series,
+    n_bins: usize,
+    breaks: Option<&Series>,
     labels: Option<&[PlSmallStr]>,
-    include_intervals: bool,
 ) -> PolarsResult<Series> {
-    let n_bins = breaks.len() + 1;
-
     let bin = match labels {
         None => bin_idx.cast(&DataType::UInt32)?,
         Some(labels) => {
             polars_ensure!(
                 labels.len() == n_bins,
-                ShapeMismatch: "binning into {} bins requires {} labels, got {}",
-                n_bins, n_bins, labels.len()
+                ShapeMismatch: "binning produces {} bins but got {} labels",
+                n_bins, labels.len()
             );
             let fcats = FrozenCategories::new(labels.iter().map(|s| s.as_str()))?;
             let dtype = DataType::from_frozen_categories(fcats.clone());
@@ -221,9 +336,10 @@ pub fn finish_bins(
         },
     };
 
-    if !include_intervals {
+    let Some(breaks) = breaks else {
         return Ok(bin.with_name(out_name));
-    }
+    };
+    debug_assert_eq!(breaks.len() + 1, n_bins);
 
     // `left[i]` is `(null ++ breaks)[bin_idx[i]]` and `right[i]` is
     // `(breaks ++ null)[bin_idx[i]]`. A null index gathers to null, so null inputs and
@@ -256,83 +372,76 @@ fn empty_bins(
     labels: Option<&[PlSmallStr]>,
     include_intervals: bool,
 ) -> PolarsResult<Series> {
-    let breaks = Series::full_null(s.name().clone(), n_bins - 1, bound_dtype);
+    let breaks = Series::full_null(PlSmallStr::EMPTY, n_bins - 1, bound_dtype);
     let bin_idx = IdxCa::full_null(s.name().clone(), s.len());
     finish_bins(
         s.name().clone(),
         &bin_idx,
-        &breaks,
+        n_bins,
+        include_intervals.then_some(&breaks),
         labels,
-        include_intervals,
     )
 }
 
 pub fn bin_intervals(
     s: &Series,
-    breaks: &Series,
+    spec: IntervalSpec<'_>,
     labels: Option<&[PlSmallStr]>,
     include_intervals: bool,
     right_closed: bool,
 ) -> PolarsResult<Series> {
-    let bin_idx = bins_from_breaks(s, breaks, right_closed)?;
-    finish_bins(
-        s.name().clone(),
-        &bin_idx,
-        breaks,
-        labels,
-        include_intervals,
-    )
-}
+    let (s, breaks) = match spec {
+        // The DSL to IR conversion already reconciled the two dtypes, so this cast is a
+        // no-op unless a numeric input was widened to meet its breakpoints.
+        IntervalSpec::Breaks(breaks) => (s.cast(breaks.dtype())?, breaks.clone()),
+        IntervalSpec::Count(n_bins) => {
+            polars_ensure!(
+                n_bins >= 1,
+                ComputeError: "`bin_intervals` requires at least one bin"
+            );
+            let breaks = uniform_interval_breaks(s, n_bins, right_closed)?;
+            // No usable min/max: an empty, all-null or all-NaN column.
+            if n_bins > 1 && breaks.null_count() == breaks.len() {
+                return empty_bins(s, n_bins, s.dtype(), labels, include_intervals);
+            }
+            (s.clone(), breaks)
+        },
+    };
 
-pub fn bin_intervals_uniform(
-    s: &Series,
-    n_bins: usize,
-    labels: Option<&[PlSmallStr]>,
-    include_intervals: bool,
-    right_closed: bool,
-) -> PolarsResult<Series> {
-    // Equal-width breakpoints need arithmetic, so this form works and reports in f64.
-    let f = s.cast(&DataType::Float64)?;
-    let breaks = uniform_interval_breaks(&f, n_bins)?;
-    if breaks.null_count() == breaks.len() && n_bins > 1 {
-        return empty_bins(s, n_bins, &DataType::Float64, labels, include_intervals);
-    }
-    let bin_idx = bins_from_breaks(&f, &breaks, right_closed)?;
+    let bin_idx = bins_from_breaks(&s, &breaks, right_closed)?;
     finish_bins(
         s.name().clone(),
         &bin_idx,
-        &breaks,
+        breaks.len() + 1,
+        include_intervals.then_some(&breaks),
         labels,
-        include_intervals,
     )
 }
 
 pub fn bin_quantiles(
     s: &Series,
-    probs: &[f64],
+    spec: FractionSpec<'_>,
     labels: Option<&[PlSmallStr]>,
     include_intervals: bool,
     right_closed: bool,
 ) -> PolarsResult<Series> {
-    let positions = quantile_break_positions(s.len() - s.null_count(), probs);
-    bin_at_positions(
-        s,
-        &positions,
-        probs.len() + 1,
-        labels,
-        include_intervals,
-        Some(right_closed),
-    )
-}
-
-pub fn bin_quantiles_uniform(
-    s: &Series,
-    n_bins: usize,
-    labels: Option<&[PlSmallStr]>,
-    include_intervals: bool,
-    right_closed: bool,
-) -> PolarsResult<Series> {
-    let positions = quantile_break_positions_uniform(s.len() - s.null_count(), n_bins);
+    let non_null_len = s.len() - s.null_count();
+    let (positions, n_bins) = match spec {
+        FractionSpec::Explicit(probs) => (
+            quantile_break_positions(non_null_len, probs),
+            probs.len() + 1,
+        ),
+        FractionSpec::Count(n_bins) => {
+            polars_ensure!(
+                n_bins >= 1,
+                ComputeError: "`bin_quantiles` requires at least one bin"
+            );
+            (
+                quantile_break_positions_uniform(non_null_len, n_bins),
+                n_bins,
+            )
+        },
+    };
     bin_at_positions(
         s,
         &positions,
@@ -345,28 +454,24 @@ pub fn bin_quantiles_uniform(
 
 pub fn bin_ranks(
     s: &Series,
-    fractions: &[f64],
+    spec: FractionSpec<'_>,
     labels: Option<&[PlSmallStr]>,
     include_intervals: bool,
 ) -> PolarsResult<Series> {
-    let positions = rank_cut_positions_fractions(s.len() - s.null_count(), fractions);
-    bin_at_positions(
-        s,
-        &positions,
-        fractions.len() + 1,
-        labels,
-        include_intervals,
-        None,
-    )
-}
-
-pub fn bin_ranks_uniform(
-    s: &Series,
-    n_bins: usize,
-    labels: Option<&[PlSmallStr]>,
-    include_intervals: bool,
-) -> PolarsResult<Series> {
-    let positions = rank_cut_positions_uniform(s.len() - s.null_count(), n_bins);
+    let non_null_len = s.len() - s.null_count();
+    let (positions, n_bins) = match spec {
+        FractionSpec::Explicit(fractions) => (
+            rank_cut_positions_fractions(non_null_len, fractions),
+            fractions.len() + 1,
+        ),
+        FractionSpec::Count(n_bins) => {
+            polars_ensure!(
+                n_bins >= 1,
+                ComputeError: "`bin_ranks` requires at least one bin"
+            );
+            (rank_cut_positions_uniform(non_null_len, n_bins), n_bins)
+        },
+    };
     bin_at_positions(s, &positions, n_bins, labels, include_intervals, None)
 }
 
@@ -375,7 +480,8 @@ pub fn bin_ranks_uniform(
 /// `right_closed` is `Some` for quantile binning, which assigns bins by comparing values
 /// against the gathered breakpoints, and `None` for rank binning, which instead compares
 /// each row's ordinal rank against the cut positions. The rank form therefore splits ties
-/// across adjacent bins, which is the whole point of it.
+/// across adjacent bins, which is the whole point of it -- and never needs the boundary
+/// values unless they are actually reported.
 fn bin_at_positions(
     s: &Series,
     positions: &[IdxSize],
@@ -384,27 +490,32 @@ fn bin_at_positions(
     include_intervals: bool,
     right_closed: Option<bool>,
 ) -> PolarsResult<Series> {
-    if s.len() == s.null_count() {
+    let non_null_len = s.len() - s.null_count();
+    if non_null_len == 0 {
         return empty_bins(s, n_bins, s.dtype(), labels, include_intervals);
     }
 
-    // Boundary values for `left`/`right`, always in the input dtype.
-    let breaks = breaks_at_sorted_positions(s, positions)?;
+    // One sort feeds both the ranks and the boundary gather.
+    let sort_idx = s.arg_sort(sort_options()).slice(0, non_null_len);
 
-    let bin_idx = match right_closed {
-        Some(right_closed) => bins_from_breaks(s, &breaks, right_closed)?,
+    let (bin_idx, breaks) = match right_closed {
+        Some(right_closed) => {
+            let breaks = gather_at_sorted_positions(s, &sort_idx, positions)?;
+            (bins_from_breaks(s, &breaks, right_closed)?, Some(breaks))
+        },
         None => {
-            let ranks = ordinal_ranks_0based(s)?.into_series();
+            let ranks = ranks_from_sort_idx(s, &sort_idx).into_series();
             let cuts = IdxCa::from_vec(PlSmallStr::EMPTY, positions.to_vec()).into_series();
-            bins_from_breaks(&ranks, &cuts, false)?
+            let bin_idx = bins_from_breaks(&ranks, &cuts, false)?;
+            let breaks = include_intervals
+                .then(|| gather_at_sorted_positions(s, &sort_idx, positions))
+                .transpose()?;
+            (bin_idx, breaks)
         },
     };
 
-    finish_bins(
-        s.name().clone(),
-        &bin_idx,
-        &breaks,
-        labels,
-        include_intervals,
-    )
+    // The value-based path needs the boundaries to bin at all, so drop them again unless
+    // they are actually being reported; `finish_bins` reads `Some` as "emit the struct".
+    let bounds = breaks.filter(|_| include_intervals);
+    finish_bins(s.name().clone(), &bin_idx, n_bins, bounds.as_ref(), labels)
 }

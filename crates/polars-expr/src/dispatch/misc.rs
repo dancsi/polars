@@ -16,6 +16,8 @@ use polars_plan::dsl::ReshapeDimension;
 use polars_plan::plans::FusedOperator;
 #[cfg(feature = "cov")]
 use polars_plan::plans::IRCorrelationMethod;
+#[cfg(feature = "cutqcut")]
+use polars_plan::plans::{BinMethod, BinOptions};
 use polars_plan::plans::{AExprSorted, DynamicPredWeakRef, RowEncodingVariant};
 use polars_row::RowEncodingOptions;
 use polars_utils::IdxSize;
@@ -1124,105 +1126,74 @@ pub fn dynamic_pred(columns: &[Column], pred: &DynamicPredWeakRef) -> PolarsResu
 }
 
 #[cfg(feature = "cutqcut")]
-pub(super) fn bin_intervals(
-    s: &Column,
-    breaks: Series,
-    labels: Option<Vec<PlSmallStr>>,
-    include_intervals: bool,
-    right_closed: bool,
-) -> PolarsResult<Column> {
-    polars_ops::prelude::bin_intervals(
-        s.as_materialized_series(),
-        &breaks,
-        labels.as_deref(),
-        include_intervals,
-        right_closed,
-    )
-    .map(Column::from)
-}
+/// The only place the binning payload is destructured for execution.
+///
+/// `polars-ops` cannot see `BinOptions` -- it sits below `polars-plan` in the crate graph
+/// -- so the plan-level six-way split is flattened into its three kernels here.
+pub(super) fn bin(s: &Column, options: BinOptions) -> PolarsResult<Column> {
+    use polars_ops::prelude::{FractionSpec, IntervalSpec};
 
-#[cfg(feature = "cutqcut")]
-pub(super) fn bin_intervals_uniform(
-    s: &Column,
-    n_bins: usize,
-    labels: Option<Vec<PlSmallStr>>,
-    include_intervals: bool,
-    right_closed: bool,
-) -> PolarsResult<Column> {
-    polars_ops::prelude::bin_intervals_uniform(
-        s.as_materialized_series(),
-        n_bins,
-        labels.as_deref(),
+    let BinOptions {
+        method,
+        labels,
         include_intervals,
-        right_closed,
-    )
-    .map(Column::from)
-}
+    } = options;
+    let labels = labels.as_deref();
+    let s = s.as_materialized_series();
 
-#[cfg(feature = "cutqcut")]
-pub(super) fn bin_quantiles(
-    s: &Column,
-    probs: Vec<f64>,
-    labels: Option<Vec<PlSmallStr>>,
-    include_intervals: bool,
-    right_closed: bool,
-) -> PolarsResult<Column> {
-    polars_ops::prelude::bin_quantiles(
-        s.as_materialized_series(),
-        &probs,
-        labels.as_deref(),
-        include_intervals,
-        right_closed,
-    )
-    .map(Column::from)
-}
-
-#[cfg(feature = "cutqcut")]
-pub(super) fn bin_quantiles_uniform(
-    s: &Column,
-    n_bins: usize,
-    labels: Option<Vec<PlSmallStr>>,
-    include_intervals: bool,
-    right_closed: bool,
-) -> PolarsResult<Column> {
-    polars_ops::prelude::bin_quantiles_uniform(
-        s.as_materialized_series(),
-        n_bins,
-        labels.as_deref(),
-        include_intervals,
-        right_closed,
-    )
-    .map(Column::from)
-}
-
-#[cfg(feature = "cutqcut")]
-pub(super) fn bin_ranks(
-    s: &Column,
-    fractions: Vec<f64>,
-    labels: Option<Vec<PlSmallStr>>,
-    include_intervals: bool,
-) -> PolarsResult<Column> {
-    polars_ops::prelude::bin_ranks(
-        s.as_materialized_series(),
-        &fractions,
-        labels.as_deref(),
-        include_intervals,
-    )
-    .map(Column::from)
-}
-
-#[cfg(feature = "cutqcut")]
-pub(super) fn bin_ranks_uniform(
-    s: &Column,
-    n_bins: usize,
-    labels: Option<Vec<PlSmallStr>>,
-    include_intervals: bool,
-) -> PolarsResult<Column> {
-    polars_ops::prelude::bin_ranks_uniform(
-        s.as_materialized_series(),
-        n_bins,
-        labels.as_deref(),
-        include_intervals,
-    )
+    match &method {
+        BinMethod::Intervals { right_closed, .. } => {
+            let breaks = method.breaks().unwrap();
+            polars_ops::prelude::bin_intervals(
+                s,
+                IntervalSpec::Breaks(breaks),
+                labels,
+                include_intervals,
+                *right_closed,
+            )
+        },
+        BinMethod::UniformIntervals {
+            n_bins,
+            right_closed,
+        } => polars_ops::prelude::bin_intervals(
+            s,
+            IntervalSpec::Count(*n_bins),
+            labels,
+            include_intervals,
+            *right_closed,
+        ),
+        BinMethod::Quantiles {
+            probs,
+            right_closed,
+        } => polars_ops::prelude::bin_quantiles(
+            s,
+            FractionSpec::Explicit(probs),
+            labels,
+            include_intervals,
+            *right_closed,
+        ),
+        BinMethod::UniformQuantiles {
+            n_bins,
+            right_closed,
+        } => polars_ops::prelude::bin_quantiles(
+            s,
+            FractionSpec::Count(*n_bins),
+            labels,
+            include_intervals,
+            *right_closed,
+        ),
+        BinMethod::Ranks { fractions } => polars_ops::prelude::bin_ranks(
+            s,
+            FractionSpec::Explicit(fractions),
+            labels,
+            include_intervals,
+        ),
+        BinMethod::UniformRanks { n_bins } => polars_ops::prelude::bin_ranks(
+            s,
+            FractionSpec::Count(*n_bins),
+            labels,
+            include_intervals,
+        ),
+    }
     .map(Column::from)
 }

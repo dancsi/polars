@@ -3,10 +3,8 @@ use std::sync::Arc;
 use polars_compute::rolling::QuantileMethod;
 use polars_core::error::PolarsResult;
 use polars_core::frame::DataFrame;
-use polars_core::prelude::{AnyValue, Column, GroupPositions};
+use polars_core::prelude::{Column, GroupPositions};
 use polars_plan::dsl::{ColumnsUdf, SpecialEq};
-#[cfg(feature = "cutqcut")]
-use polars_plan::plans::{BinMethod, BinOptions};
 use polars_plan::plans::{IRBooleanFunction, IRFunctionExpr, IRPowFunction};
 use polars_utils::IdxSize;
 
@@ -414,80 +412,8 @@ pub fn function_expr_to_udf(func: IRFunctionExpr) -> SpecialEq<Arc<dyn ColumnsUd
             allow_duplicates,
             include_breaks
         ),
-        // The only place the binning payload is destructured for execution: each form
-        // maps onto one `polars-ops` orchestrator, which is why `polars-ops` never needs
-        // to know about `BinOptions` at all.
         #[cfg(feature = "cutqcut")]
-        F::Bin(options) => {
-            let BinOptions {
-                method,
-                labels,
-                include_intervals,
-            } = options;
-            match method {
-                BinMethod::Intervals {
-                    ref breaks,
-                    right_closed,
-                } => {
-                    let AnyValue::List(breaks) = breaks.value() else {
-                        unreachable!("bin_intervals breakpoints must be a List value")
-                    };
-                    // Owned up front: the udf closure outlives the borrow of `method`.
-                    let breaks = breaks.clone();
-                    map!(
-                        misc::bin_intervals,
-                        breaks.clone(),
-                        labels.clone(),
-                        include_intervals,
-                        right_closed
-                    )
-                },
-                BinMethod::UniformIntervals {
-                    n_bins,
-                    right_closed,
-                } => map!(
-                    misc::bin_intervals_uniform,
-                    n_bins,
-                    labels.clone(),
-                    include_intervals,
-                    right_closed
-                ),
-                BinMethod::Quantiles {
-                    probs,
-                    right_closed,
-                } => map!(
-                    misc::bin_quantiles,
-                    probs.clone(),
-                    labels.clone(),
-                    include_intervals,
-                    right_closed
-                ),
-                BinMethod::UniformQuantiles {
-                    n_bins,
-                    right_closed,
-                } => map!(
-                    misc::bin_quantiles_uniform,
-                    n_bins,
-                    labels.clone(),
-                    include_intervals,
-                    right_closed
-                ),
-                BinMethod::Ranks { fractions } => map!(
-                    misc::bin_ranks,
-                    fractions.clone(),
-                    labels.clone(),
-                    include_intervals
-                ),
-                BinMethod::UniformRanks { n_bins } => {
-                    map!(
-                        misc::bin_ranks_uniform,
-                        n_bins,
-                        labels.clone(),
-                        include_intervals
-                    )
-                },
-            }
-        },
+        F::Bin(options) => map!(misc::bin, options.clone()),
         #[cfg(feature = "rle")]
         F::RLE => map!(polars_ops::series::rle),
         #[cfg(feature = "rle")]
