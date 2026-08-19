@@ -120,74 +120,94 @@ fn gather_at_sorted_positions(
     s.take(&phys_idx)
 }
 
-/// Order-preserving map between an integer and `u128`.
+/// The two width-specific steps equal-width binning needs: measuring the span between
+/// two values, and stepping back out from `min` by an offset within that span.
 ///
-/// Equal-width breakpoints are computed in this domain so that one accumulator width
-/// covers every integer type without overflow, and so that `max - min` cannot overflow
-/// the input's own width (`i64::MIN` to `i64::MAX` does).
-trait OrderedBits: Copy {
-    fn to_ordered(self) -> u128;
-    fn from_ordered(bits: u128) -> Self;
+/// Wrapping arithmetic on the raw two's-complement bits is exact here: `min <= max`
+/// guarantees the true span fits the unsigned width, whereas a signed subtraction would
+/// overflow from `i64::MIN` to `i64::MAX`. Widening to a common type first is not an
+/// option either -- `as u128` sign-extends, and `i128` holds neither a `u128` value nor
+/// an `i128` span -- and nothing in the numeric trait hierarchy names the unsigned type
+/// of a given width, so the two signednesses are spelled out separately.
+trait BinWidth: Copy {
+    /// `self - min`, non-negative because `self` is the column's max.
+    fn span_from(self, min: Self) -> u128;
+    /// `self + offset`, where `offset` lies within the span and so cannot overflow, nor
+    /// lose anything on the way back down to this width.
+    fn offset_by(self, offset: u128) -> Self;
 }
 
-macro_rules! impl_ordered_bits {
-    ($($signed:ty => $unsigned:ty),* $(,)?) => {
+macro_rules! impl_bin_width {
+    (signed: $($t:ty),* $(,)?) => {
         $(
-            impl OrderedBits for $signed {
-                fn to_ordered(self) -> u128 {
-                    // Flipping the sign bit maps the signed range onto the unsigned one
-                    // while preserving order.
-                    ((self as $unsigned) ^ (1 << (<$unsigned>::BITS - 1))) as u128
+            impl BinWidth for $t {
+                fn span_from(self, min: Self) -> u128 {
+                    // `cast_unsigned` is a bit reinterpretation at the same width, so
+                    // unlike `as` it cannot silently truncate or sign-extend.
+                    self.cast_unsigned().wrapping_sub(min.cast_unsigned()).into()
                 }
-                fn from_ordered(bits: u128) -> Self {
-                    ((bits as $unsigned) ^ (1 << (<$unsigned>::BITS - 1))) as $signed
+                fn offset_by(self, offset: u128) -> Self {
+                    self.cast_unsigned().wrapping_add(offset as _).cast_signed()
                 }
             }
-            impl OrderedBits for $unsigned {
-                fn to_ordered(self) -> u128 {
-                    self as u128
+        )*
+    };
+    (unsigned: $($t:ty),* $(,)?) => {
+        $(
+            impl BinWidth for $t {
+                fn span_from(self, min: Self) -> u128 {
+                    self.wrapping_sub(min).into()
                 }
-                fn from_ordered(bits: u128) -> Self {
-                    bits as $unsigned
+                fn offset_by(self, offset: u128) -> Self {
+                    self.wrapping_add(offset as _)
                 }
             }
         )*
     };
 }
 
-impl_ordered_bits!(i8 => u8, i16 => u16, i32 => u32, i64 => u64, i128 => u128);
+impl_bin_width!(signed: i8, i16, i32, i64, i128);
+impl_bin_width!(unsigned: u8, u16, u32, u64, u128);
 
-/// Representable thresholds for equal-width bins over `[min, max]`.
+/// Offsets from `min` of the `n_bins - 1` thresholds of equal-width bins over a span.
 ///
-/// The exact breakpoints need not be representable in an integer dtype. For left-closed
-/// bins the equivalent threshold is their ceiling; for right-closed bins it is their
-/// floor. Quotient/remainder accumulation computes those thresholds without overflowing
-/// and without going through `f64`.
-fn uniform_integer_thresholds<N: OrderedBits>(
+/// The exact breakpoint `i * span / n_bins` need not be an integer. For left-closed bins
+/// the equivalent threshold is its ceiling; for right-closed bins it is its floor. So
+/// carry the division as a quotient plus a running remainder: `offset` is the floor and
+/// `error` is the numerator of the fraction still owed, which is non-zero exactly when
+/// the ceiling is one higher.
+fn uniform_threshold_offsets(
+    span: u128,
+    n_bins: usize,
+    right_closed: bool,
+) -> impl Iterator<Item = u128> {
+    let n = n_bins as u128;
+    let (step, remainder) = (span / n, span % n);
+    let mut offset = 0;
+    let mut error = 0;
+
+    (1..n_bins).map(move |_| {
+        offset += step;
+        error += remainder;
+        if error >= n {
+            offset += 1;
+            error -= n;
+        }
+
+        let round_up = !right_closed && error != 0;
+        offset + u128::from(round_up)
+    })
+}
+
+/// Representable thresholds for equal-width bins over `[min, max]`, in `N`'s own width.
+fn uniform_integer_thresholds<N: BinWidth>(
     min: N,
     max: N,
     n_bins: usize,
     right_closed: bool,
 ) -> Vec<N> {
-    let n = n_bins as u128;
-    let min = min.to_ordered();
-    let span = max.to_ordered() - min;
-    let (step, remainder) = (span / n, span % n);
-    let mut offset = 0;
-    let mut error = 0;
-
-    (1..n_bins)
-        .map(|_| {
-            offset += step;
-            error += remainder;
-            if error >= n {
-                offset += 1;
-                error -= n;
-            }
-
-            let round_up = !right_closed && error != 0;
-            N::from_ordered(min + offset + u128::from(round_up))
-        })
+    uniform_threshold_offsets(max.span_from(min), n_bins, right_closed)
+        .map(|offset| min.offset_by(offset))
         .collect()
 }
 
@@ -518,4 +538,56 @@ fn bin_at_positions(
     // they are actually being reported; `finish_bins` reads `Some` as "emit the struct".
     let bounds = breaks.filter(|_| include_intervals);
     finish_bins(s.name().clone(), &bin_idx, n_bins, bounds.as_ref(), labels)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn offsets(span: u128, n_bins: usize, right_closed: bool) -> Vec<u128> {
+        uniform_threshold_offsets(span, n_bins, right_closed).collect()
+    }
+
+    #[test]
+    fn exact_division_needs_no_rounding() {
+        // 100 over 4 bins divides evenly, so both closures agree.
+        assert_eq!(offsets(100, 4, false), [25, 50, 75]);
+        assert_eq!(offsets(100, 4, true), [25, 50, 75]);
+    }
+
+    #[test]
+    fn left_closed_takes_the_ceiling_and_right_closed_the_floor() {
+        // The exact breakpoints over a span of 3 in 10 bins are 0.3, 0.6, ... 2.7.
+        assert_eq!(offsets(3, 10, false), [1, 1, 1, 2, 2, 2, 3, 3, 3]);
+        assert_eq!(offsets(3, 10, true), [0, 0, 0, 1, 1, 1, 2, 2, 2]);
+    }
+
+    #[test]
+    fn thresholds_are_non_decreasing_and_stay_within_the_span() {
+        for span in [0, 1, 7, 1000, u128::MAX] {
+            for n_bins in [1, 2, 3, 7, 64, 1000] {
+                for right_closed in [false, true] {
+                    let got = offsets(span, n_bins, right_closed);
+                    assert_eq!(got.len(), n_bins - 1);
+                    assert!(got.windows(2).all(|w| w[0] <= w[1]));
+                    assert!(got.iter().all(|o| *o <= span));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_span_of_zero_puts_every_threshold_on_min() {
+        assert_eq!(offsets(0, 5, false), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn the_span_is_measured_with_wrapping_arithmetic() {
+        // A signed subtraction would overflow on either of these.
+        assert_eq!(i64::MAX.span_from(i64::MIN), u64::MAX as u128);
+        assert_eq!(i128::MAX.span_from(i128::MIN), u128::MAX);
+        assert_eq!(u128::MAX.span_from(0), u128::MAX);
+        assert_eq!(i8::MIN.offset_by(u8::MAX as u128), i8::MAX);
+        assert_eq!(i128::MIN.offset_by(u128::MAX), i128::MAX);
+    }
 }
