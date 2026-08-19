@@ -1006,10 +1006,6 @@ pub(super) fn convert_functions(
                     breaks,
                     right_closed,
                 } => {
-                    let breaks = match breaks.value() {
-                        AnyValue::List(s) => s.clone(),
-                        _ => unreachable!("bin_intervals breakpoints must be a List value"),
-                    };
                     polars_ensure!(
                         breaks.null_count() == 0,
                         ComputeError: "`{}` breakpoints cannot contain nulls", name
@@ -1019,9 +1015,9 @@ pub(super) fn convert_functions(
                         // breakpoints and an integer column takes fractional ones. Same
                         // flags `search_sorted` itself declares, so a numeric column can
                         // never be dragged over to `String`.
-                        let opts =
-                            (SuperTypeFlags::default() & !SuperTypeFlags::ALLOW_PRIMITIVE_TO_STRING)
-                                .into();
+                        let opts = (SuperTypeFlags::default()
+                            & !SuperTypeFlags::ALLOW_PRIMITIVE_TO_STRING)
+                            .into();
                         let supertype =
                             try_get_supertype_with_options(&input_dtype, breaks.dtype(), opts)?;
                         breaks.cast(&supertype)?
@@ -1034,7 +1030,10 @@ pub(super) fn convert_functions(
                     // After the cast: widening cannot collapse breakpoints, but a
                     // `Decimal` to `Float64` promotion can.
                     ensure_strictly_ascending(&breaks, name, "intervals")?;
-                    BinMethod::intervals(breaks, right_closed)
+                    BinMethod::Intervals {
+                        breaks,
+                        right_closed,
+                    }
                 },
                 BinMethod::Quantiles {
                     probs,

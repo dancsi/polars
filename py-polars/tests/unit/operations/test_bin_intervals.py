@@ -250,3 +250,37 @@ def test_bin_intervals_uniform_float_extremes() -> None:
 
     assert result.struct["bin"].to_list() == [0, 1]
     assert result.struct["right"].to_list() == [0.0, None]
+
+
+@pytest.mark.parametrize(
+    ("dtype", "values"),
+    [
+        (pl.Int8, [-128, 0, 127]),
+        (pl.Int64, [-(2**63), 0, 2**63 - 1]),
+        (pl.Int128, [-(2**127), 0, 2**127 - 1]),
+        (pl.UInt64, [0, 2**63, 2**64 - 1]),
+        (pl.UInt128, [0, 2**127, 2**128 - 1]),
+    ],
+)
+def test_bin_intervals_uniform_spans_the_full_width(
+    dtype: pl.DataType, values: list[int]
+) -> None:
+    s = pl.Series("a", values, dtype=dtype)
+
+    result = s.bin_intervals(3, labels=False)
+
+    # `max - min` overflows the input's own signed width here, so the span has to be
+    # measured in the unsigned domain. Getting that wrong collapses the whole column
+    # into a single bin.
+    assert result.to_list() == [0, 1, 2]
+
+
+def test_bin_intervals_uniform_with_no_span() -> None:
+    s = pl.Series("a", [7, 7, 7])
+
+    result = s.bin_intervals(4, labels=False, include_intervals=True)
+
+    # Every threshold lands on `min`, so the whole column falls into the last bin.
+    assert result.struct["bin"].to_list() == [3, 3, 3]
+    assert result.struct["left"].to_list() == [7, 7, 7]
+    assert result.struct["right"].to_list() == [None, None, None]

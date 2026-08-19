@@ -1,3 +1,4 @@
+use polars_core::CHEAP_SERIES_HASH_LIMIT;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -18,12 +19,15 @@ pub struct BinOptions {
 #[cfg_attr(feature = "dsl-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, PartialEq, Debug)]
 pub enum BinMethod {
-    /// Explicit breakpoints, held as one `List` value. Reconciled with the input during
-    /// DSL to IR conversion: numeric breakpoints and a numeric input are both widened to
-    /// their supertype, anything else is cast down to the input dtype. Either way the
-    /// inner dtype by the time this reaches the IR is the dtype both sides are compared
-    /// in, which is also the dtype of the reported boundaries.
-    Intervals { breaks: Scalar, right_closed: bool },
+    /// Explicit breakpoints. Reconciled with the input during DSL to IR conversion:
+    /// numeric breakpoints and a numeric input are both widened to their supertype,
+    /// anything else is cast down to the input dtype. Either way, by the time this
+    /// reaches the IR the dtype is the one both sides are compared in, which is also the
+    /// dtype of the reported boundaries.
+    ///
+    /// `Series` carries its own `PartialEq`, serde and schema impls, so the only thing
+    /// it does not supply for this enum is `Hash`, hand-written below.
+    Intervals { breaks: Series, right_closed: bool },
     /// `n_bins` equal-width bins spanning `[min, max]`. The breakpoints are derived at
     /// runtime, in the input dtype.
     UniformIntervals { n_bins: usize, right_closed: bool },
@@ -44,25 +48,10 @@ pub enum BinMethod {
 }
 
 impl BinMethod {
-    /// Bin by explicit breakpoints.
-    ///
-    /// The breakpoints are wrapped into a single `List` value so that the payload
-    /// inherits [`Scalar`]'s `Hash`, serde and schema impls.
-    pub fn intervals(breaks: Series, right_closed: bool) -> Self {
-        let dtype = DataType::List(Box::new(breaks.dtype().clone()));
-        Self::Intervals {
-            breaks: Scalar::new(dtype, AnyValue::List(breaks)),
-            right_closed,
-        }
-    }
-
     /// The explicit breakpoints, if this is [`BinMethod::Intervals`].
     pub fn breaks(&self) -> Option<&Series> {
         match self {
-            Self::Intervals { breaks, .. } => match breaks.value() {
-                AnyValue::List(s) => Some(s),
-                _ => unreachable!("bin_intervals breakpoints must be a List value"),
-            },
+            Self::Intervals { breaks, .. } => Some(breaks),
             _ => None,
         }
     }
@@ -119,7 +108,15 @@ impl Hash for BinMethod {
                 breaks,
                 right_closed,
             } => {
-                breaks.hash(state);
+                // `Series` has no `Hash`. Hashing the leading values keeps this bounded
+                // for a pathologically long breakpoint list while still honouring the
+                // contract that equal breakpoints hash equally -- which mixing in the
+                // buffer address, as `LiteralValue` does, would not.
+                breaks.dtype().hash(state);
+                breaks.len().hash(state);
+                for av in breaks.iter().take(CHEAP_SERIES_HASH_LIMIT) {
+                    av.hash(state);
+                }
                 right_closed.hash(state);
             },
             Self::UniformIntervals {

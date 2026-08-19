@@ -257,7 +257,10 @@ impl PyExpr {
         self.inner
             .clone()
             .bin(BinOptions {
-                method: BinMethod::intervals(breaks, right_closed),
+                method: BinMethod::Intervals {
+                    breaks,
+                    right_closed,
+                },
                 labels: bin_labels(labels),
                 include_intervals,
             })
